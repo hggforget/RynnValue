@@ -580,12 +580,18 @@ uv run python tools/convert_rynn_value_lang_to_hf.py \
 
 ## Model Zoo
 
+RynnValue provides 4B and 8B checkpoints with either fixed-bin or quantile value tokenization. All variants use absolute and relative distributional heads to predict remaining time and signed temporal displacement in seconds, and generate trajectory analysis (`Video Description`, `Match`, and `Success`).
+
 | Model | Backbone | RBM-EVAL-OOD τₐ | Description |
 |---|---|---:|---|
-| [`RynnValue-4B`](https://huggingface.co/Alibaba-DAMO-Academy/RynnValue-4B) | [RynnBrain-4B](https://huggingface.co/Alibaba-DAMO-Academy/RynnBrain-4B) | 0.679 | Remaining-time value model with absolute + relative distributional heads and Analysis generation |
-| [`RynnValue-8B`](https://huggingface.co/Alibaba-DAMO-Academy/RynnValue-8B) | [RynnBrain-8B](https://huggingface.co/Alibaba-DAMO-Academy/RynnBrain-8B) | **0.704** | Remaining-time value model with absolute + relative distributional heads and Analysis generation |
+| [`RynnValue-8B-Quantile`](https://huggingface.co/Alibaba-DAMO-Academy/RynnValue-8B-Quantile) (default) | [RynnBrain-8B](https://huggingface.co/Alibaba-DAMO-Academy/RynnBrain-8B) | **0.704** | 8B model with data-driven quantile bins; highest average policy-ranking score among these checkpoints |
+| [`RynnValue-4B-Quantile`](https://huggingface.co/Alibaba-DAMO-Academy/RynnValue-4B-Quantile) (default) | [RynnBrain-4B](https://huggingface.co/Alibaba-DAMO-Academy/RynnBrain-4B) | 0.679 | 4B model with data-driven quantile bins for finer resolution at short horizons |
+| [`RynnValue-8B`](https://huggingface.co/Alibaba-DAMO-Academy/RynnValue-8B) | [RynnBrain-8B](https://huggingface.co/Alibaba-DAMO-Academy/RynnBrain-8B) | 0.675 | 8B model with fixed-bin value tokenization |
+| [`RynnValue-4B`](https://huggingface.co/Alibaba-DAMO-Academy/RynnValue-4B) | [RynnBrain-4B](https://huggingface.co/Alibaba-DAMO-Academy/RynnBrain-4B) | 0.670 | 4B model with fixed-bin value tokenization |
 
-Both checkpoints are also mirrored on [ModelScope](https://www.modelscope.cn/collections/DAMO_Academy/RynnValue). Load them with `trust_remote_code=True`, as in [Using RynnValue Programmatically](#using-rynnvalue-programmatically).
+Scores are average Kendall's τₐ across the six RBM-EVAL-OOD policy-ranking suites, evaluated with a causal attention mask. The headline results in this README correspond to the **Quantile** variants; see [Policy Ranking: Attention Mask and Value Tokenizer](#policy-ranking-attention-mask-and-value-tokenizer) for the full comparison.
+
+See the [ModelScope collection](https://www.modelscope.cn/collections/DAMO_Academy/RynnValue) for mirrored checkpoints. Load any variant with `trust_remote_code=True`, as in [Using RynnValue Programmatically](#using-rynnvalue-programmatically).
 
 ## Acknowledgements
 
