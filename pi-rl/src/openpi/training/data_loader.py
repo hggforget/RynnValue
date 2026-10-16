@@ -151,6 +151,7 @@ def create_torch_dataset(
         data_config.repo_id,
         delta_timestamps=delta_timestamps,
         episodes=list(data_config.episode_ids) if data_config.episode_ids else None,
+        video_backend=data_config.video_backend,
     )
 
     if data_config.prompt_from_task:
@@ -209,6 +210,7 @@ def create_multi_torch_dataset(
         repo_ids,
         delta_timestamps=delta_timestamps,
         episodes=episodes_arg,
+        video_backend=data_config.video_backend,
     )
     if data_config.prompt_from_task:
         tasks_per_dataset = tuple(sub.meta.tasks for sub in dataset._datasets)  # noqa: SLF001

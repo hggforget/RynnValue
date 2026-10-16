@@ -20,10 +20,11 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
-import openpi.policies.libero_policy as libero_policy
-import openpi.policies.franka_single_policy as franka_single_policy
 import openpi.policies.franka_dual_policy as franka_dual_policy
 import openpi.policies.franka_optimized_policy as franka_optimized_policy
+import openpi.policies.franka_single_policy as franka_single_policy
+import openpi.policies.libero_policy as libero_policy
+import openpi.policies.pku_franka_policy as pku_franka_policy
 import openpi.policies.robotwin_policy as robotwin_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -93,6 +94,9 @@ class DataConfig:
     # sequence is defined by the `action_horizon` field in the model config. This should be adjusted if your
     # LeRobot dataset is using different keys to represent the action.
     action_sequence_keys: Sequence[str] = ("actions",)
+
+    # Optional LeRobot video decoder override; None uses LeRobot's platform default.
+    video_backend: str | None = None
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
@@ -813,6 +817,34 @@ class LeRobotRobotwinMultiDataConfig(MultiDataConfigFactory):
             model_transforms=model_transforms,
             action_sequence_keys=("action",),
             episode_ids=episode_ids,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPkuFrankaDataConfig(DataConfigFactory):
+    """PKU FR3: one RGB camera, 7-D Cartesian state and recorded delta actions.
+
+    Unlike the joint-space Franka datasets below, this dataset uses flat
+    ``image``, ``state`` and ``actions`` keys. Do not apply DeltaActions or
+    AbsoluteActions: the first six action dimensions are already increments,
+    and the last dimension is a gripper command rather than a width target.
+    """
+
+    default_prompt: str | None = "Pick up the object on the table and place it into the container."
+    # PyAV's bundled FFmpeg decodes AV1 without system libtorchcodec dependencies.
+    video_backend: str = "pyav"
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            data_transforms=_transforms.Group(
+                inputs=[pku_franka_policy.PkuFrankaInputs()],
+                outputs=[pku_franka_policy.PkuFrankaOutputs()],
+            ),
+            model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
+            action_sequence_keys=("actions",),
+            video_backend=self.video_backend,
         )
 
 
@@ -2153,6 +2185,67 @@ class TrainConfig:
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
+    # PKU Franka FR3 cube-to-plate dataset (5 Hz, one episode / 703 frames).
+    # Keep action_dim=32 to load pi05_base; model transforms pad the 7-D data,
+    # and PkuFrankaOutputs trims predictions back to 7-D Cartesian deltas.
+    TrainConfig(
+        name="pi05_pku_franka",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=LeRobotPkuFrankaDataConfig(
+            repo_id="/home/hdc/datasets/fr3_put_the_cube_onto_the_plate_20261013",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+        batch_size=8,
+        num_workers=2,
+        num_train_steps=2_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=200,
+            peak_lr=5e-5,
+            decay_steps=2_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=500,
+        keep_period=500,
+        fsdp_devices=1,
+    ),
+    TrainConfig(
+        name="pi05_pku_franka_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotPkuFrankaDataConfig(
+            repo_id="/home/hdc/datasets/fr3_put_the_cube_onto_the_plate_20261013",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+        batch_size=8,
+        num_workers=2,
+        num_train_steps=2_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=200,
+            peak_lr=1e-4,
+            decay_steps=2_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        save_interval=500,
+        keep_period=500,
+        fsdp_devices=1,
+    ),
     #
     # Fine-tuning Franka real-robot configs.
     #
