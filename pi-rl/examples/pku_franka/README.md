@@ -1,5 +1,9 @@
 # PKU Franka FR3 微调
 
+2026-10-17 的双相机 collect-objects 数据集请使用
+[独立配置及说明](collect_objects_20261017.md)。它使用绝对末端目标和 0/1 夹爪动作，
+与本文旧单相机数据的动作契约不同。
+
 数据集：`/home/hdc/datasets/fr3_put_the_cube_onto_the_plate_20261013`，
 LeRobot v2.1，5 Hz，1 条轨迹、703 帧。
 

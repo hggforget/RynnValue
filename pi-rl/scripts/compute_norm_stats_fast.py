@@ -239,8 +239,7 @@ def main(
     if data is not config.data:
         config = dataclasses.replace(config, data=data)
     if repo_id is not None:
-        new_assets = dataclasses.replace(config.data.assets, asset_id=None)
-        config = dataclasses.replace(config, data=dataclasses.replace(config.data, repo_id=repo_id, assets=new_assets))
+        config = dataclasses.replace(config, data=dataclasses.replace(config.data, repo_id=repo_id))
     if episode_filter_path is not None and hasattr(config.data, "episode_filter_path"):
         config = dataclasses.replace(
             config, data=dataclasses.replace(config.data, episode_filter_path=episode_filter_path)
@@ -278,7 +277,7 @@ def main(
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    output_path = config.assets_dirs / data_config.repo_id
+    output_path = config.assets_dirs / (data_config.asset_id or data_config.repo_id)
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 

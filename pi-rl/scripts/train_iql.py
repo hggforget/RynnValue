@@ -283,6 +283,11 @@ def _chunk_reward(
     transform's scalar reward unchanged -- only correct when ``H=1`` or
     when the dataset really does only have a single-step reward.
     """
+    # Robot-specific transforms may already include discounting and terminal
+    # absorption (FR3). Keep legacy progress/step-cost behavior for other robots.
+    if "chunk_reward" in batch:
+        return np.asarray(jax.device_get(batch["chunk_reward"]), dtype=np.float32).reshape(-1)
+
     if step_reward_discount is not None and "progress" in batch:
         gamma = step_reward_discount
         progress = np.asarray(jax.device_get(batch["progress"]), dtype=np.float32)  # [B, H+1]
@@ -516,6 +521,10 @@ def maybe_log_camera_views(batch: dict):
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
+
+    reward_discount = getattr(config.data, "reward_discount", None)
+    if reward_discount is not None and config.iql is not None and not np.isclose(reward_discount, config.iql.discount):
+        raise ValueError("data.reward_discount must match iql.discount for pre-discounted FR3 rewards")
 
     if config.iql is None:
         raise ValueError(

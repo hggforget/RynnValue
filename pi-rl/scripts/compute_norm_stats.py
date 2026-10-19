@@ -101,10 +101,8 @@ def main(config_name: str, max_frames: int | None = None, repo_id: str | None = 
     """
     config = _config.get_config(config_name)
     if repo_id is not None:
-        # Replace both the data factory's repo_id and any explicit asset_id so the new
-        # asset directory is keyed by this repo_id.
-        new_assets = dataclasses.replace(config.data.assets, asset_id=None)
-        config = dataclasses.replace(config, data=dataclasses.replace(config.data, repo_id=repo_id, assets=new_assets))
+        # Preserve an explicit asset identifier when the same dataset is remounted.
+        config = dataclasses.replace(config, data=dataclasses.replace(config.data, repo_id=repo_id))
     data_config = config.data.create(config.assets_dirs, config.model)
 
     if data_config.rlds_data_dir is not None:
@@ -125,7 +123,7 @@ def main(config_name: str, max_frames: int | None = None, repo_id: str | None = 
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    output_path = config.assets_dirs / data_config.repo_id
+    output_path = config.assets_dirs / (data_config.asset_id or data_config.repo_id)
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 

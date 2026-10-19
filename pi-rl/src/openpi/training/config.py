@@ -24,6 +24,8 @@ import openpi.policies.franka_dual_policy as franka_dual_policy
 import openpi.policies.franka_optimized_policy as franka_optimized_policy
 import openpi.policies.franka_single_policy as franka_single_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.pku_franka_collect_policy as pku_franka_collect_policy
+import openpi.policies.pku_franka_collect_rl_policy as pku_franka_collect_rl_policy
 import openpi.policies.pku_franka_policy as pku_franka_policy
 import openpi.policies.robotwin_policy as robotwin_policy
 import openpi.shared.download as _download
@@ -845,6 +847,99 @@ class LeRobotPkuFrankaDataConfig(DataConfigFactory):
             model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
             action_sequence_keys=("actions",),
             video_backend=self.video_backend,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPkuFrankaCollectDataConfig(DataConfigFactory):
+    """Dual-camera FR3 collection: measured 14-D state, absolute 7-D actions."""
+
+    default_prompt: str | None = pku_franka_collect_policy.COLLECT_OBJECTS_PROMPT
+    video_backend: str = "pyav"
+    excluded_episode_ids: tuple[int, ...] = ()
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
+        episode_ids = (
+            pku_franka_collect_policy.training_episode_ids(repo_id, self.excluded_episode_ids)
+            if repo_id is not None
+            else None
+        )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            data_transforms=_transforms.Group(
+                inputs=[pku_franka_collect_policy.PkuFrankaCollectInputs()],
+                outputs=[pku_franka_collect_policy.PkuFrankaCollectOutputs()],
+            ),
+            model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
+            action_sequence_keys=("action",),
+            video_backend=self.video_backend,
+            episode_ids=episode_ids,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPkuFrankaCollectRLDataConfig(LeRobotPkuFrankaCollectDataConfig):
+    """IQL keeps successful, failed and unlabeled episodes; progress is required."""
+
+    failed_episode_ids: tuple[int, ...] = (0, 2, 14, 21, 47, 52)
+    reward_discount: float = 0.99
+    progress_reward_weight: float = 1.0
+    failure_penalty: float = 1.0
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> RLDataConfig:
+        info, lengths = pku_franka_collect_rl_policy.collection_metadata(self.repo_id)
+        next_dt = model_config.action_horizon / float(info["fps"])
+        extra_dt = dict.fromkeys(
+            [
+                "observation.images.primary", "observation.images.wrist",
+                "observation.state.cartesian", "observation.state.gripper", "observation.state.joints",
+            ],
+            (0.0, next_dt),
+        )
+        extra_dt["progress"] = tuple(t / float(info["fps"]) for t in range(model_config.action_horizon + 1))
+        base = super().create(assets_dirs, model_config)
+        fields = {f.name: getattr(base, f.name) for f in dataclasses.fields(base)}
+        fields["data_transforms"] = _transforms.Group(
+            inputs=[pku_franka_collect_rl_policy.PkuFrankaCollectRLInputs(
+                episode_lengths=lengths,
+                failed_episode_ids=self.failed_episode_ids,
+                discount=self.reward_discount,
+                progress_reward_weight=self.progress_reward_weight,
+                failure_penalty=self.failure_penalty,
+            )],
+            outputs=[pku_franka_collect_policy.PkuFrankaCollectOutputs()],
+        )
+        return RLDataConfig(**fields, extra_delta_timestamps=extra_dt, reward_source="progress")
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPkuFrankaCollectFilterBCDataConfig(LeRobotPkuFrankaCollectDataConfig):
+    """Full-parameter BC on progress-filtered frames from the FR3 dataset."""
+
+    advantage_horizon: int = 50
+    advantage_lambda: float = 0.98
+    advantage_criterion: Literal["zero", "mean", "median", "quantile"] = "zero"
+    advantage_quantile: float = 0.7
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MixedMultiDataConfig:
+        available = self.repo_id is not None and (pathlib.Path(self.repo_id) / "meta/info.json").is_file()
+        frame_filters = None
+        if available:
+            kept, _ = pku_franka_collect_rl_policy.filtered_frame_indices(
+                self.repo_id, self.excluded_episode_ids, self.advantage_horizon,
+                self.advantage_lambda, self.advantage_criterion, self.advantage_quantile,
+            )
+            frame_filters = (kept,)
+            logging.info("FR3 Filter BC keeps %d frames", len(kept))
+        base = super().create(assets_dirs, model_config)
+        fields = {f.name: getattr(base, f.name) for f in dataclasses.fields(base)}
+        fields["episode_ids"] = {self.repo_id: base.episode_ids} if base.episode_ids else None
+        return MixedMultiDataConfig(
+            **fields, repo_ids=(self.repo_id,) if self.repo_id else (), frame_filter_indices=frame_filters,
         )
 
 
@@ -2185,6 +2280,125 @@ class TrainConfig:
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
+    # FR3 collect-objects dataset: 30 Hz, primary + wrist RGB, 64 episodes.
+    # The six excluded episodes are explicitly marked failed in episodes.jsonl.
+    # Train on absolute Cartesian targets, with measured state only (no target leakage).
+    TrainConfig(
+        name="pi05_pku_franka_collect_objects",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+        data=LeRobotPkuFrankaCollectDataConfig(
+            repo_id="/home/hdc/workspace/DATA/local/fr3_collect_objects_20261017",
+            assets=AssetsConfig(asset_id="pku_franka_collect_objects"),
+            base_config=DataConfig(prompt_from_task=True),
+            excluded_episode_ids=(0, 2, 14, 21, 47, 52),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+        batch_size=16,
+        num_workers=4,
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=20_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=1_000,
+        keep_period=5_000,
+        fsdp_devices=1,
+    ),
+    TrainConfig(
+        name="pi05_pku_franka_collect_objects_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotPkuFrankaCollectDataConfig(
+            repo_id="/home/hdc/workspace/DATA/local/fr3_collect_objects_20261017",
+            assets=AssetsConfig(asset_id="pku_franka_collect_objects"),
+            base_config=DataConfig(prompt_from_task=True),
+            excluded_episode_ids=(0, 2, 14, 21, 47, 52),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+        batch_size=16,
+        num_workers=4,
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=20_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        save_interval=1_000,
+        keep_period=5_000,
+        fsdp_devices=1,
+    ),
+    TrainConfig(
+        name="pi05_pku_franka_collect_objects_iql",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+        data=LeRobotPkuFrankaCollectRLDataConfig(
+            repo_id="/home/hdc/workspace/DATA/local/fr3_collect_objects_20261017",
+            assets=AssetsConfig(asset_id="pku_franka_collect_objects"),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+        batch_size=16,
+        num_workers=4,
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=3e-5, decay_steps=20_000, decay_lr=3e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=1_000,
+        keep_period=5_000,
+        fsdp_devices=1,
+        iql=IQLConfig(
+            critic_lr=3e-4, value_lr=3e-4, discount=0.99, expectile=0.8,
+            A_scaling=10.0, encoder_type="resnet_18_v1", color_jitter=False,
+            num_cameras=2,
+            image_keys=("image.base_0_rgb", "image.left_wrist_0_rgb"),
+            next_image_keys=("next_image_base", "next_image_wrist"),
+            critic_warmup_steps=1_000,
+        ),
+    ),
+    TrainConfig(
+        name="pi05_pku_franka_collect_objects_filter_bc",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+        data=LeRobotPkuFrankaCollectFilterBCDataConfig(
+            repo_id="/home/hdc/workspace/DATA/local/fr3_collect_objects_20261017",
+            assets=AssetsConfig(asset_id="pku_franka_collect_objects"),
+            base_config=DataConfig(prompt_from_task=True),
+            excluded_episode_ids=(0, 2, 14, 21, 47, 52),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+        batch_size=16,
+        num_workers=4,
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=20_000, decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=1_000,
+        keep_period=5_000,
+        fsdp_devices=1,
+    ),
     # PKU Franka FR3 cube-to-plate dataset (5 Hz, one episode / 703 frames).
     # Keep action_dim=32 to load pi05_base; model transforms pad the 7-D data,
     # and PkuFrankaOutputs trims predictions back to 7-D Cartesian deltas.
