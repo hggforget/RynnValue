@@ -39,6 +39,7 @@ fi
 IFS=',' read -ra GPU_LIST <<< "$GPUS"
 FSDP_DEVICES="${FSDP_DEVICES:-${#GPU_LIST[@]}}"
 CKPT_BASE_DIR="${CKPT_BASE_DIR:-./checkpoints}"
+WEIGHT_PARAMS_PATH="${WEIGHT_PARAMS_PATH:-/oss/embodied-ai-data/pku/pi05_base/params}"
 
 case "$METHOD:$CONFIG" in
     sft:pi05_pku_franka_collect_objects) ;;
@@ -100,5 +101,9 @@ TRAIN_ARGS=(
 )
 if [[ -n "${INIT_CHECKPOINT:-}" ]]; then
     TRAIN_ARGS+=(--weight-loader.params-path "${INIT_CHECKPOINT%/}/params")
+elif [[ -d "$WEIGHT_PARAMS_PATH" ]]; then
+    TRAIN_ARGS+=(--weight-loader.params-path "$WEIGHT_PARAMS_PATH")
+else
+    echo "Warning: base weights not found at $WEIGHT_PARAMS_PATH; using the config's default loader." >&2
 fi
 "$PYTHON" "${TRAIN_ARGS[@]}" "$@"
