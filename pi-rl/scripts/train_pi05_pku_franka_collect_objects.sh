@@ -8,7 +8,9 @@ cd "$PROJECT_ROOT"
 # The environment may have an editable openpi install from another checkout; prefer this repo.
 export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
-PYTHON="${PYTHON:-python3}"
+DEFAULT_PYTHON=/opt/conda/envs/pku-pi-rl/bin/python
+[[ -x "$DEFAULT_PYTHON" ]] || DEFAULT_PYTHON=python3
+PYTHON="${PYTHON:-$DEFAULT_PYTHON}"
 METHOD="${METHOD:-sft}"
 CONFIG_PREFIX=pi05_pku_franka_collect_objects
 case "${ACTION_REPRESENTATION:-absolute}" in
@@ -23,10 +25,19 @@ case "$METHOD" in
     *) echo "METHOD must be sft, iql, or filter_bc" >&2; exit 1 ;;
 esac
 CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
-REPO_ID="${REPO_ID:-/home/hdc/workspace/DATA/local/fr3_collect_objects_20261017}"
-EXP_NAME="${EXP_NAME:-fr3_collect_objects_20261017}"
-GPUS="${GPUS:-0}"
-FSDP_DEVICES="${FSDP_DEVICES:-1}"
+REPO_ID="${REPO_ID:-/oss/embodied-ai-data/pku/fr3_collect_objects_20261017}"
+EXP_NAME="${EXP_NAME:-fr3_collect_objects_20261017_$(date +%m%d_%H%M%S)}"
+if [[ -z "${GPUS:-}" ]]; then
+    GPUS=0
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l || true)
+        if [[ "$GPU_COUNT" -gt 1 ]]; then
+            GPUS=$(seq -s, 0 $((GPU_COUNT - 1)))
+        fi
+    fi
+fi
+IFS=',' read -ra GPU_LIST <<< "$GPUS"
+FSDP_DEVICES="${FSDP_DEVICES:-${#GPU_LIST[@]}}"
 CKPT_BASE_DIR="${CKPT_BASE_DIR:-./checkpoints}"
 
 case "$METHOD:$CONFIG" in
