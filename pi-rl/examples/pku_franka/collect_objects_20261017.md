@@ -8,11 +8,10 @@
 | 微调方式 | 绝对动作配置 | 相对动作配置 | 学习率 |
 | --- | --- | --- | --- |
 | 全参数 SFT | `pi05_pku_franka_collect_objects` | `pi05_pku_franka_collect_objects_relative` | 5e-5 → 5e-6 |
-| PaliGemma + action expert LoRA | `pi05_pku_franka_collect_objects_lora` | `pi05_pku_franka_collect_objects_relative_lora` | 1e-4 → 1e-5 |
 | 全参数 IQL | `pi05_pku_franka_collect_objects_iql` | `pi05_pku_franka_collect_objects_relative_iql` | 3e-5 → 3e-6 |
 | 全参数 Filter BC | `pi05_pku_franka_collect_objects_filter_bc` | `pi05_pku_franka_collect_objects_relative_filter_bc` | 5e-5 → 5e-6 |
 
-以上八个离线配置均为 Batch 16、Horizon 30（1 秒）、20,000 步；从 `pi05_base` 初始化，
+以上六个离线配置均为 Batch 16、Horizon 30（1 秒）、20,000 步；从 `pi05_base` 初始化，
 warmup 1,000 步，每 1,000 步保存 checkpoint。原配置名继续表示绝对动作，`_relative` 系列读取已录制的相对动作。
 π0.5 保持内部 32 维以加载预训练权重，状态和动作分别补齐后输入模型。
 20,000 步是起始训练预算，按 42,465 个保留帧和 Batch 16 约相当于 7.5 遍数据；
@@ -72,15 +71,11 @@ METHOD=filter_bc bash scripts/train_pi05_pku_franka_collect_objects.sh
 ACTION_REPRESENTATION=relative bash scripts/train_pi05_pku_franka_collect_objects.sh
 ACTION_REPRESENTATION=relative METHOD=iql bash scripts/train_pi05_pku_franka_collect_objects.sh
 ACTION_REPRESENTATION=relative METHOD=filter_bc bash scripts/train_pi05_pku_franka_collect_objects.sh
-
-# 相对动作 LoRA；显式 CONFIG 时脚本自动识别动作表示。
-CONFIG=pi05_pku_franka_collect_objects_relative_lora \
-  bash scripts/train_pi05_pku_franka_collect_objects.sh
 ```
 
 默认 `ACTION_REPRESENTATION=absolute`。若同时显式指定 CONFIG 和 ACTION_REPRESENTATION，二者必须一致。
 
-根据显存调整 Batch / FSDP；LoRA 仍可显式通过 CONFIG 选择：
+根据显存调整 Batch / FSDP：
 
 ```bash
 CONFIG=pi05_pku_franka_collect_objects GPUS=0,1 FSDP_DEVICES=2 \
@@ -202,6 +197,6 @@ actions = policy.infer(observation)["actions"]  # (30, 7)，含义由加载的�
 - 新增 IQL 奖励/终止、Filter BC 索引，以及 DSRL 噪声到动作、显式 next observation、
   终止/截断和更新循环测试。progress 使用合成夹具；没有为原始数据伪造标注。
 - 2026-10-20 在采集环境运行适配器、RL、启动脚本和已有 DSRL 回归共 26 项测试，全部通过。
-  启动脚本测试覆盖 8 个配置的入口与独立统计路径、动作表示冲突和禁止误读另一种表示的统计。
-  8 个配置工厂通过隔离构造验证；IQL/Filter BC 使用临时合成 progress 数据，模型/tokenizer 依赖被隔离。
+  启动脚本测试覆盖 6 个配置的入口与独立统计路径、动作表示冲突和禁止误读另一种表示的统计。
+  6 个配置工厂通过隔离构造验证；IQL/Filter BC 使用临时合成 progress 数据，模型/tokenizer 依赖被隔离。
   同时修复 macOS Bash 3 在未设置 INIT_CHECKPOINT 时展开空数组的兼容性问题。

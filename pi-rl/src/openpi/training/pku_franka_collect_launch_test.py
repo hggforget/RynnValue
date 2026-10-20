@@ -64,20 +64,15 @@ class CollectLaunchTest(unittest.TestCase):
             ["bash", str(self.script)], env=env, capture_output=True, text=True, check=False, timeout=10
         )
 
-    def test_all_eight_presets_route_to_matching_trainer_and_norm_assets(self):
+    def test_all_six_presets_route_to_matching_trainer_and_norm_assets(self):
         for representation in ["absolute", "relative"]:
             prefix = "pi05_pku_franka_collect_objects" + ("_relative" if representation == "relative" else "")
-            for method, suffix in [("sft", ""), ("sft", "_lora"), ("iql", "_iql"), ("filter_bc", "_filter_bc")]:
+            for method, suffix in [("sft", ""), ("iql", "_iql"), ("filter_bc", "_filter_bc")]:
                 with self.subTest(representation=representation, method=method, suffix=suffix):
                     config = prefix + suffix
                     log = self.root / "calls.jsonl"
                     log.unlink(missing_ok=True)
-                    # Explicit LoRA CONFIG must also work without an action env var.
-                    result = self.launch(
-                        method=method,
-                        representation=None if suffix == "_lora" else representation,
-                        config=config if suffix == "_lora" else None,
-                    )
+                    result = self.launch(method=method, representation=representation)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     calls = [json.loads(line) for line in log.read_text().splitlines()]
                     self.assertEqual(calls[0][calls[0].index("--config-name") + 1], config)

@@ -6,11 +6,10 @@ from openpi.policies import pku_franka_policy
 from openpi.training import config as _config
 
 
-@pytest.mark.parametrize("config_name", ["pi05_pku_franka", "pi05_pku_franka_lora"])
-def test_recorded_actions_stay_deltas(config_name, tmp_path, monkeypatch):
+def test_recorded_actions_stay_deltas(tmp_path, monkeypatch):
     # Test the robot transforms without downloading a language tokenizer.
     monkeypatch.setattr(_config.ModelTransformFactory, "__call__", lambda self, model: transforms.Group())
-    config = _config.get_config(config_name)
+    config = _config.get_config("pi05_pku_franka")
     factory = _config.LeRobotPkuFrankaDataConfig(repo_id=str(tmp_path))
     data_config = factory.create(tmp_path, config.model)
     state = np.array([0.35, 0.02, 0.23, -3.15, 0.01, 0.0, 0.08], dtype=np.float32)

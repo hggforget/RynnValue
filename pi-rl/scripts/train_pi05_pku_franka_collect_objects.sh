@@ -28,8 +28,8 @@ FSDP_DEVICES="${FSDP_DEVICES:-1}"
 CKPT_BASE_DIR="${CKPT_BASE_DIR:-./checkpoints}"
 
 case "$METHOD:$CONFIG" in
-    sft:pi05_pku_franka_collect_objects|sft:pi05_pku_franka_collect_objects_lora) ;;
-    sft:pi05_pku_franka_collect_objects_relative|sft:pi05_pku_franka_collect_objects_relative_lora) ;;
+    sft:pi05_pku_franka_collect_objects) ;;
+    sft:pi05_pku_franka_collect_objects_relative) ;;
     iql:pi05_pku_franka_collect_objects_iql) ;;
     iql:pi05_pku_franka_collect_objects_relative_iql) ;;
     filter_bc:pi05_pku_franka_collect_objects_filter_bc) ;;
