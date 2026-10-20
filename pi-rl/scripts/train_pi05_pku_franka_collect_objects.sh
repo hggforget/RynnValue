@@ -8,10 +8,16 @@ cd "$PROJECT_ROOT"
 
 PYTHON="${PYTHON:-python3}"
 METHOD="${METHOD:-sft}"
+CONFIG_PREFIX=pi05_pku_franka_collect_objects
+case "${ACTION_REPRESENTATION:-absolute}" in
+    absolute) ;;
+    relative) CONFIG_PREFIX+=_relative ;;
+    *) echo "ACTION_REPRESENTATION must be absolute or relative" >&2; exit 1 ;;
+esac
 case "$METHOD" in
-    sft) DEFAULT_CONFIG=pi05_pku_franka_collect_objects; TRAIN_SCRIPT=scripts/train.py ;;
-    iql) DEFAULT_CONFIG=pi05_pku_franka_collect_objects_iql; TRAIN_SCRIPT=scripts/train_iql.py ;;
-    filter_bc) DEFAULT_CONFIG=pi05_pku_franka_collect_objects_filter_bc; TRAIN_SCRIPT=scripts/train.py ;;
+    sft) DEFAULT_CONFIG="$CONFIG_PREFIX"; TRAIN_SCRIPT=scripts/train.py ;;
+    iql) DEFAULT_CONFIG="${CONFIG_PREFIX}_iql"; TRAIN_SCRIPT=scripts/train_iql.py ;;
+    filter_bc) DEFAULT_CONFIG="${CONFIG_PREFIX}_filter_bc"; TRAIN_SCRIPT=scripts/train.py ;;
     *) echo "METHOD must be sft, iql, or filter_bc" >&2; exit 1 ;;
 esac
 CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
@@ -23,10 +29,22 @@ CKPT_BASE_DIR="${CKPT_BASE_DIR:-./checkpoints}"
 
 case "$METHOD:$CONFIG" in
     sft:pi05_pku_franka_collect_objects|sft:pi05_pku_franka_collect_objects_lora) ;;
+    sft:pi05_pku_franka_collect_objects_relative|sft:pi05_pku_franka_collect_objects_relative_lora) ;;
     iql:pi05_pku_franka_collect_objects_iql) ;;
+    iql:pi05_pku_franka_collect_objects_relative_iql) ;;
     filter_bc:pi05_pku_franka_collect_objects_filter_bc) ;;
+    filter_bc:pi05_pku_franka_collect_objects_relative_filter_bc) ;;
     *) echo "Unsupported CONFIG: $CONFIG" >&2; exit 1 ;;
 esac
+ASSET_ID=pku_franka_collect_objects
+case "$CONFIG" in
+    pi05_pku_franka_collect_objects_relative*) CONFIG_REPRESENTATION=relative; ASSET_ID+=_relative ;;
+    *) CONFIG_REPRESENTATION=absolute ;;
+esac
+if [[ -n "${ACTION_REPRESENTATION:-}" && "$ACTION_REPRESENTATION" != "$CONFIG_REPRESENTATION" ]]; then
+    echo "CONFIG=$CONFIG conflicts with ACTION_REPRESENTATION=$ACTION_REPRESENTATION" >&2
+    exit 1
+fi
 if [[ ! -f "$REPO_ID/meta/info.json" ]]; then
     echo "Dataset is not mounted at $REPO_ID; set REPO_ID to its local path." >&2
     exit 1
@@ -43,9 +61,9 @@ if [[ "${SKIP_NORM:-0}" != "1" ]]; then
         --config-name "$CONFIG" --repo-id "$REPO_ID" --num-workers 0 --batch-size 1
 fi
 
-# Both presets use the same 14-D measured state and 7-D absolute action stats.
-# Reject old 20-D state stats. SKIP_NORM also requires the same action contract.
-NORM_STATS_FILE="./assets/$CONFIG/pku_franka_collect_objects/norm_stats.json"
+# Each preset has its own stats, and the action representations have separate
+# asset IDs. Reject old 20-D state stats, including when SKIP_NORM is requested.
+NORM_STATS_FILE="./assets/$CONFIG/$ASSET_ID/norm_stats.json"
 "$PYTHON" - "$NORM_STATS_FILE" <<'PY'
 import json
 import sys
@@ -60,14 +78,14 @@ for key, dimension in [("state", 14), ("actions", 7)]:
 PY
 
 # No --overwrite: existing experiments require an explicit --resume or a new name.
-INIT_ARGS=()
+TRAIN_ARGS=(
+    "$TRAIN_SCRIPT" "$CONFIG"
+    --exp-name "$EXP_NAME"
+    --data.repo-id "$REPO_ID"
+    --checkpoint-base-dir "$CKPT_BASE_DIR"
+    --fsdp-devices "$FSDP_DEVICES"
+)
 if [[ -n "${INIT_CHECKPOINT:-}" ]]; then
-    INIT_ARGS+=(--weight-loader.params-path "${INIT_CHECKPOINT%/}/params")
+    TRAIN_ARGS+=(--weight-loader.params-path "${INIT_CHECKPOINT%/}/params")
 fi
-"$PYTHON" "$TRAIN_SCRIPT" "$CONFIG" \
-    --exp-name "$EXP_NAME" \
-    --data.repo-id "$REPO_ID" \
-    --checkpoint-base-dir "$CKPT_BASE_DIR" \
-    --fsdp-devices "$FSDP_DEVICES" \
-    "${INIT_ARGS[@]}" \
-    "$@"
+"$PYTHON" "${TRAIN_ARGS[@]}" "$@"

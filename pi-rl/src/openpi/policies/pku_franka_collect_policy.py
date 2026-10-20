@@ -1,4 +1,4 @@
-"""Dual-camera FR3 collection with absolute Cartesian target actions.
+"""Dual-camera FR3 collection with absolute targets or recorded relative actions.
 
 Only measured state is exposed to the policy. The dataset's 20-D combined
 ``observation.state`` includes the current target, which equals the action
@@ -8,6 +8,7 @@ label, so neither that field nor ``observation.state.target`` is consumed.
 import dataclasses
 import json
 import pathlib
+from typing import Literal
 
 import numpy as np
 
@@ -15,6 +16,31 @@ COLLECT_OBJECTS_PROMPT = "place each object on the plate that matches its color.
 _MISSPELLED_PROMPT = "lace each object on the plate that matches its color."
 ACTION_DIM = 7
 STATE_DIM = 14
+ActionRepresentation = Literal["absolute", "relative"]
+
+
+def action_key(action_representation: ActionRepresentation) -> str:
+    if action_representation == "absolute":
+        return "action"
+    if action_representation == "relative":
+        return "action.relative"
+    raise ValueError(f"Unknown FR3 action representation: {action_representation}")
+
+
+def validate_action_metadata(repo_id: str | None, action_representation: ActionRepresentation) -> None:
+    """Check the selected label field when mounted; checkpoint serving needs no dataset."""
+    key = action_key(action_representation)
+    if repo_id is None:
+        return
+    info_path = pathlib.Path(repo_id) / "meta/info.json"
+    if not info_path.is_file():
+        return
+    features = json.loads(info_path.read_text())["features"]
+    if key not in features:
+        raise ValueError(f"FR3 {action_representation} training requires dataset field '{key}'")
+    expected = "absolute_target_pose" if action_representation == "absolute" else "relative_delta_pose"
+    if features[key].get("representation", expected) != expected:
+        raise ValueError(f"Dataset field '{key}' must use representation '{expected}'")
 
 
 def training_episode_ids(repo_id: str, excluded_episode_ids: tuple[int, ...]) -> tuple[int, ...] | None:
@@ -59,10 +85,16 @@ class PkuFrankaCollectInputs:
     """Map raw LeRobot fields to OpenPI; also accepts the same fields at inference.
 
     State: measured Cartesian pose(6), normalized gripper opening(1), joints(7).
-    Actions: absolute target [x, y, z, roll, pitch, yaw, gripper], with 0=closed
-    and 1=open. ``action.relative`` is a separate recorded control signal and
-    is deliberately not used by this absolute-action policy.
+    Absolute labels come from ``action``; relative labels come directly from
+    ``action.relative`` (no differencing or accumulation). The first six values
+    are Cartesian targets or increments. Both use gripper 0=closed, 1=open;
+    the gripper command is never differenced.
     """
+
+    action_representation: ActionRepresentation = "absolute"
+
+    def __post_init__(self):
+        action_key(self.action_representation)
 
     def __call__(self, data: dict) -> dict:
         cartesian = np.asarray(data["observation.state.cartesian"], dtype=np.float32)
@@ -81,11 +113,16 @@ class PkuFrankaCollectInputs:
             },
             "image_mask": {"base_0_rgb": np.True_, "left_wrist_0_rgb": np.True_},
         }
-        if "action" in data:
-            actions = np.asarray(data["action"], dtype=np.float32)
-            if actions.ndim != 2 or actions.shape[-1] != ACTION_DIM:
-                raise ValueError(f"Expected an absolute Cartesian action chunk [T, 7], got {actions.shape}")
+        key = action_key(self.action_representation)
+        if key in data:
+            actions = np.asarray(data[key], dtype=np.float32)
+            if actions.ndim != 2 or actions.shape[-1] != ACTION_DIM or not np.isfinite(actions).all():
+                raise ValueError(
+                    f"Expected a finite {self.action_representation} Cartesian action chunk [T, 7], got {actions.shape}"
+                )
             inputs["actions"] = actions
+        elif "action" in data or "action.relative" in data:
+            raise KeyError(f"Missing selected FR3 action field '{key}'; refusing to use the other representation")
         if "prompt" in data:
             prompt = np.asarray(data["prompt"]).item()
             if isinstance(prompt, bytes):
@@ -97,7 +134,7 @@ class PkuFrankaCollectInputs:
 
 @dataclasses.dataclass(frozen=True)
 class PkuFrankaCollectOutputs:
-    """Trim model padding; preserve absolute targets and the 0/1 gripper scale."""
+    """Trim padding; preserve the selected action representation and 0/1 gripper."""
 
     def __call__(self, data: dict) -> dict:
         return {"actions": np.asarray(data["actions"])[..., :ACTION_DIM]}

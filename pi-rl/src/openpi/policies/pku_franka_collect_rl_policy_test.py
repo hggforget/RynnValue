@@ -30,6 +30,22 @@ def _transition(frame=0):
 
 
 class CollectRLTest(unittest.TestCase):
+    def test_relative_iql_transition_and_norm_scan_use_the_same_recorded_labels(self):
+        item = _transition()
+        item["action"][:] = np.nan
+        item["action.relative"] = np.tile([0.01, -0.02, 0.03, 0, 0, 0, 1], (3, 1))
+        transform = rl.PkuFrankaCollectRLInputs({0: 10}, discount=0.9, action_representation="relative")
+        output = transform(item)
+        np.testing.assert_array_equal(output["actions"], item["action.relative"].astype(np.float32))
+        np.testing.assert_array_equal(
+            output["next_state"][:6], item["observation.state.cartesian"][1].astype(np.float32)
+        )
+        self.assertAlmostEqual(float(output["chunk_reward"]), 0.9**3 * 0.4 - 0.1, places=6)
+        for key in list(item):
+            if key.startswith("observation.") and key != "observation.state.target":
+                item[key] = np.asarray(item[key])[0]
+        np.testing.assert_array_equal(transform(item)["actions"], output["actions"])
+
     def test_nonterminal_transition_and_discounted_potential(self):
         transformed = rl.PkuFrankaCollectRLInputs({0: 10}, discount=0.9)(_transition())
         self.assertEqual(transformed["state"].shape, (14,))
@@ -72,9 +88,10 @@ class CollectRLTest(unittest.TestCase):
                 item[key] = np.asarray(item[key])[0]
         del item["action"]
         del item["progress"]
-        output = rl.PkuFrankaCollectRLInputs()(item)
-        self.assertEqual(output["state"].shape, (14,))
-        self.assertNotIn("actions", output)
+        for representation in ["absolute", "relative"]:
+            output = rl.PkuFrankaCollectRLInputs(action_representation=representation)(item)
+            self.assertEqual(output["state"].shape, (14,))
+            self.assertNotIn("actions", output)
         self.assertEqual(rl.collection_metadata(None), ({"fps": 30}, {}))
 
     def test_window_scores_match_brute_force_and_episode_tail(self):

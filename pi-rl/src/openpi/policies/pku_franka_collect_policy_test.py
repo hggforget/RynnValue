@@ -44,6 +44,44 @@ class CollectPolicyTest(unittest.TestCase):
         outputs = policy.PkuFrankaCollectOutputs()({"actions": padded})
         np.testing.assert_array_equal(outputs["actions"], sample["action"])
 
+    def test_relative_labels_are_recorded_increments_and_preserve_gripper(self):
+        sample = _sample()
+        sample["action"][:] = np.nan  # The other representation must never be read.
+        sample["action.relative"] = np.tile([0.01, -0.02, 0.03, 0.001, -0.002, 0.003, 1.0], (30, 1))
+        sample["action.relative"][1, -1] = 0
+        inputs = policy.PkuFrankaCollectInputs(action_representation="relative")(sample)
+        expected = sample["action.relative"].astype(np.float32)
+        np.testing.assert_array_equal(inputs["actions"], expected)
+        self.assertEqual(inputs["state"].shape, (14,))
+        padded = np.pad(inputs["actions"], ((0, 0), (0, 25)))
+        np.testing.assert_array_equal(policy.PkuFrankaCollectOutputs()({"actions": padded})["actions"], expected)
+
+    def test_missing_selected_labels_do_not_fall_back_to_other_representation(self):
+        for representation, key in [("absolute", "action"), ("relative", "action.relative")]:
+            with self.subTest(representation=representation):
+                sample = _sample()
+                del sample[key]
+                with self.assertRaisesRegex(KeyError, "Missing selected FR3 action field"):
+                    policy.PkuFrankaCollectInputs(action_representation=representation)(sample)
+        with self.assertRaisesRegex(ValueError, "Unknown FR3 action representation"):
+            policy.PkuFrankaCollectInputs(action_representation="invalid")
+
+    def test_metadata_requires_selected_recorded_field_and_correct_representation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            meta = pathlib.Path(directory) / "meta"
+            meta.mkdir()
+            path = meta / "info.json"
+            path.write_text(json.dumps({"features": {"action": {"representation": "absolute_target_pose"}}}))
+            policy.validate_action_metadata(directory, "absolute")
+            with self.assertRaisesRegex(ValueError, "action.relative"):
+                policy.validate_action_metadata(directory, "relative")
+            path.write_text(json.dumps({"features": {"action.relative": {"representation": "absolute_target_pose"}}}))
+            with self.assertRaisesRegex(ValueError, "relative_delta_pose"):
+                policy.validate_action_metadata(directory, "relative")
+            path.write_text(json.dumps({"features": {"action.relative": {"representation": "relative_delta_pose"}}}))
+            policy.validate_action_metadata(directory, "relative")
+            policy.validate_action_metadata(None, "relative")
+
     def test_two_cameras_and_prompt_typo(self):
         inputs = policy.PkuFrankaCollectInputs()(_sample())
         self.assertEqual(set(inputs["image"]), {"base_0_rgb", "left_wrist_0_rgb"})
@@ -60,9 +98,10 @@ class CollectPolicyTest(unittest.TestCase):
             del sample[key]
         sample["observation.state.gripper"] = np.array([0.75])
         sample["prompt"] = "a different instruction"
-        inputs = policy.PkuFrankaCollectInputs()(sample)
-        self.assertNotIn("actions", inputs)
-        self.assertEqual(inputs["prompt"], "a different instruction")
+        for representation in ["absolute", "relative"]:
+            inputs = policy.PkuFrankaCollectInputs(action_representation=representation)(sample)
+            self.assertNotIn("actions", inputs)
+            self.assertEqual(inputs["prompt"], "a different instruction")
         sample["prompt"] = ""
         self.assertNotIn("prompt", policy.PkuFrankaCollectInputs()(sample))
 

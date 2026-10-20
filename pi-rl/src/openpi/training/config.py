@@ -852,15 +852,17 @@ class LeRobotPkuFrankaDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotPkuFrankaCollectDataConfig(DataConfigFactory):
-    """Dual-camera FR3 collection: measured 14-D state, absolute 7-D actions."""
+    """Dual-camera FR3 collection: measured 14-D state, absolute or relative 7-D actions."""
 
     default_prompt: str | None = pku_franka_collect_policy.COLLECT_OBJECTS_PROMPT
     video_backend: str = "pyav"
     excluded_episode_ids: tuple[int, ...] = ()
+    action_representation: Literal["absolute", "relative"] = "absolute"
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
+        pku_franka_collect_policy.validate_action_metadata(repo_id, self.action_representation)
         episode_ids = (
             pku_franka_collect_policy.training_episode_ids(repo_id, self.excluded_episode_ids)
             if repo_id is not None
@@ -869,11 +871,13 @@ class LeRobotPkuFrankaCollectDataConfig(DataConfigFactory):
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             data_transforms=_transforms.Group(
-                inputs=[pku_franka_collect_policy.PkuFrankaCollectInputs()],
+                inputs=[pku_franka_collect_policy.PkuFrankaCollectInputs(
+                    action_representation=self.action_representation,
+                )],
                 outputs=[pku_franka_collect_policy.PkuFrankaCollectOutputs()],
             ),
             model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
-            action_sequence_keys=("action",),
+            action_sequence_keys=(pku_franka_collect_policy.action_key(self.action_representation),),
             video_backend=self.video_backend,
             episode_ids=episode_ids,
         )
@@ -909,6 +913,7 @@ class LeRobotPkuFrankaCollectRLDataConfig(LeRobotPkuFrankaCollectDataConfig):
                 discount=self.reward_discount,
                 progress_reward_weight=self.progress_reward_weight,
                 failure_penalty=self.failure_penalty,
+                action_representation=self.action_representation,
             )],
             outputs=[pku_franka_collect_policy.PkuFrankaCollectOutputs()],
         )
@@ -4061,6 +4066,22 @@ _CONFIGS = [
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
+]
+
+# Keep training hyperparameters identical across action representations. Relative
+# presets read recorded action.relative chunks and bundle separate norm assets.
+_CONFIGS += [
+    dataclasses.replace(
+        config,
+        name=config.name.replace("pku_franka_collect_objects", "pku_franka_collect_objects_relative", 1),
+        data=dataclasses.replace(
+            config.data,
+            action_representation="relative",
+            assets=dataclasses.replace(config.data.assets, asset_id="pku_franka_collect_objects_relative"),
+        ),
+    )
+    for config in _CONFIGS
+    if isinstance(config.data, LeRobotPkuFrankaCollectDataConfig) and config.data.action_representation == "absolute"
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

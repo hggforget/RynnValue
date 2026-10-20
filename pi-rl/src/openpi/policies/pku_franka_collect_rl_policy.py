@@ -85,12 +85,14 @@ class PkuFrankaCollectRLInputs:
     discount: float = 0.99
     progress_reward_weight: float = 1.0
     failure_penalty: float = 1.0
+    action_representation: collect.ActionRepresentation = "absolute"
 
     def __call__(self, data: dict) -> dict:
+        transform = collect.PkuFrankaCollectInputs(action_representation=self.action_representation)
         cartesian = np.asarray(data["observation.state.cartesian"])
         if cartesian.ndim == 1:
             # Same transform supports norm-stat scans and checkpoint inference.
-            return collect.PkuFrankaCollectInputs()(data)
+            return transform(data)
         if cartesian.shape != (2, 6):
             raise ValueError(f"Expected current/next Cartesian state [2, 6], got {cartesian.shape}")
         views = []
@@ -104,7 +106,7 @@ class PkuFrankaCollectRLInputs:
                 "observation.images.wrist",
             ]:
                 item[key] = np.asarray(data[key])[offset]
-            views.append(collect.PkuFrankaCollectInputs()(item))
+            views.append(transform(item))
         inputs, future = views
         episode = int(np.asarray(data["episode_index"]).item())
         frame = int(np.asarray(data["frame_index"]).item())

@@ -5,14 +5,15 @@
 全部 Parquet 时间戳与 128 个视频流均为 30 Hz；`video_info.video.fps` 中残留的 5 Hz
 字段不作为训练时间轴。配置不修改原始数据和元数据。
 
-| 配置 | 微调方式 | Batch | Horizon | Steps | 学习率 |
-| --- | --- | --- | --- | --- | --- |
-| `pi05_pku_franka_collect_objects_lora` | PaliGemma + action expert LoRA | 16 | 30（1 秒） | 20,000 | 1e-4 → 1e-5 |
-| `pi05_pku_franka_collect_objects` | 全参数 | 16 | 30（1 秒） | 20,000 | 5e-5 → 5e-6 |
-| `pi05_pku_franka_collect_objects_iql` | 全参数 IQL | 16 | 30 | 20,000 | 3e-5 → 3e-6 |
-| `pi05_pku_franka_collect_objects_filter_bc` | 全参数 Filter BC | 16 | 30 | 20,000 | 5e-5 → 5e-6 |
+| 微调方式 | 绝对动作配置 | 相对动作配置 | 学习率 |
+| --- | --- | --- | --- |
+| 全参数 SFT | `pi05_pku_franka_collect_objects` | `pi05_pku_franka_collect_objects_relative` | 5e-5 → 5e-6 |
+| PaliGemma + action expert LoRA | `pi05_pku_franka_collect_objects_lora` | `pi05_pku_franka_collect_objects_relative_lora` | 1e-4 → 1e-5 |
+| 全参数 IQL | `pi05_pku_franka_collect_objects_iql` | `pi05_pku_franka_collect_objects_relative_iql` | 3e-5 → 3e-6 |
+| 全参数 Filter BC | `pi05_pku_franka_collect_objects_filter_bc` | `pi05_pku_franka_collect_objects_relative_filter_bc` | 5e-5 → 5e-6 |
 
-均从 `pi05_base` 初始化，warmup 1,000 步，每 1,000 步保存 checkpoint。
+以上八个离线配置均为 Batch 16、Horizon 30（1 秒）、20,000 步；从 `pi05_base` 初始化，
+warmup 1,000 步，每 1,000 步保存 checkpoint。原配置名继续表示绝对动作，`_relative` 系列读取已录制的相对动作。
 π0.5 保持内部 32 维以加载预训练权重，状态和动作分别补齐后输入模型。
 20,000 步是起始训练预算，按 42,465 个保留帧和 Batch 16 约相当于 7.5 遍数据；
 应结合独立保留轨迹和实际任务表现选择 checkpoint。当前配置沿用数据集的 train split，未建立验证集。
@@ -27,16 +28,18 @@
 | `observation.state.gripper` | 实测夹爪开度，原数据已归一化到 0–1，保留该单位 |
 | `observation.state.joints` | 实测 7 维关节角 |
 | `action` | 7 维绝对末端目标 `[x,y,z,roll,pitch,yaw,gripper]`，机器人基座坐标系、Euler XYZ |
-| `action.relative` | 此配置不使用 |
+| `action.relative` | 相对版本使用：7 维 `[Δx,Δy,Δz,Δroll,Δpitch,Δyaw,gripper]`，机器人基座坐标系、米/弧度 |
 | `task_index` | 从 `tasks.jsonl` 取得语言指令 |
 
 模型状态为 `[实测 Cartesian(6), gripper(1), joints(7)]`，共 14 维，归一化后作为 π0.5
 离散状态 token 输入。不要使用原始 20 维 `observation.state`：最后 6 维是
 `observation.state.target`，在全部 64 条轨迹中都与当前 `action[:6]` 完全相同，属于标签泄漏。
 
-动作使用 `action` 的绝对目标，不求差分、不累积 `action.relative`。夹爪动作保留
-`0=闭合、1=张开`，与旧 `pi05_pku_franka` 的 `-1/+1` 约定不同。
-旧配置和旧归一化文件不可直接替换使用。
+绝对版本直接读取 `action`，相对版本直接读取 `action.relative`；两者均不做差分或累积。
+相对字段是采集时保存的控制增量，不是用相邻绝对目标临时求差得到的标签。
+两种版本的夹爪动作都保持 `0=闭合、1=张开`，夹爪这一维不取增量；图像处理与 14 维实测状态完全相同。
+选中的动作字段缺失、元数据中的动作表示不匹配或标签包含 NaN/Inf 会报错，不会退回另一个字段。
+两种动作版本的归一化统计和 checkpoint 不可混用；旧 `pi05_pku_franka` 的夹爪 `-1/+1` 约定也不同。
 
 数据的两个 task 实际是同一任务，其中一个漏了首字母。适配器将
 `lace each object on the plate that matches its color.` 统一为
@@ -63,6 +66,20 @@ METHOD=iql bash scripts/train_pi05_pku_franka_collect_objects.sh
 METHOD=filter_bc bash scripts/train_pi05_pku_franka_collect_objects.sh
 ```
 
+相对动作版本，通过 `ACTION_REPRESENTATION=relative` 切换：
+
+```bash
+ACTION_REPRESENTATION=relative bash scripts/train_pi05_pku_franka_collect_objects.sh
+ACTION_REPRESENTATION=relative METHOD=iql bash scripts/train_pi05_pku_franka_collect_objects.sh
+ACTION_REPRESENTATION=relative METHOD=filter_bc bash scripts/train_pi05_pku_franka_collect_objects.sh
+
+# 相对动作 LoRA；显式 CONFIG 时脚本自动识别动作表示。
+CONFIG=pi05_pku_franka_collect_objects_relative_lora \
+  bash scripts/train_pi05_pku_franka_collect_objects.sh
+```
+
+默认 `ACTION_REPRESENTATION=absolute`。若同时显式指定 CONFIG 和 ACTION_REPRESENTATION，二者必须一致。
+
 根据显存调整 Batch / FSDP；LoRA 仍可显式通过 CONFIG 选择：
 
 ```bash
@@ -79,8 +96,9 @@ PYTHON=/已安装训练依赖的环境/bin/python \
 ```
 
 脚本先用 CPU 扫描各方法实际使用的轨迹/帧，跳过视频解码，重新计算归一化统计，写入
-`assets/<配置名>/pku_franka_collect_objects/norm_stats.json`。统计只使用上述 14 维实测状态和 7 维绝对动作。
-每种配置独立保存统计，避免不同筛选集合覆盖彼此；确认统计正确且白名单未变后，可用 `SKIP_NORM=1` 跳过。
+`assets/<配置名>/<asset_id>/norm_stats.json`。绝对版本的 asset_id 为 `pku_franka_collect_objects`，
+相对版本为 `pku_franka_collect_objects_relative`。统计只使用上述 14 维实测状态和所选字段的 7 维动作。
+每个配置独立计算统计，避免动作表示或不同筛选集合覆盖彼此；确认统计正确且白名单未变后，可用 `SKIP_NORM=1` 跳过。
 checkpoint 位于 `./checkpoints/<配置名>/<EXP_NAME>/`，默认实验名为
 `fr3_collect_objects_20261017`。续训增加 `--resume`；新实验通过 `EXP_NAME` 更名。
 
@@ -102,10 +120,13 @@ Filter BC 对保留轨迹计算 `A_t = sum(k<W) lambda^k * (progress[t+k+1]-prog
 默认 `W=50`、`lambda=0.98`，保留 `A_t>0` 的全局帧索引，随后执行全参数普通 BC。
 也支持 mean / median / quantile 阈值，不把筛选分数作为策略输入；每次重新计算索引，避免标签更新后误用旧缓存。
 
-IQL 可从 SFT checkpoint 初始化：
+IQL 可从同一动作版本的 SFT checkpoint 初始化：
 
 ```bash
 METHOD=iql INIT_CHECKPOINT=/训练输出/SFT实验/20000 \
+  bash scripts/train_pi05_pku_franka_collect_objects.sh
+
+ACTION_REPRESENTATION=relative METHOD=iql INIT_CHECKPOINT=/训练输出/相对动作SFT实验/20000 \
   bash scripts/train_pi05_pku_franka_collect_objects.sh
 ```
 
@@ -114,6 +135,7 @@ METHOD=iql INIT_CHECKPOINT=/训练输出/SFT实验/20000 \
 `openpi.training.pku_franka_dsrl.DsrlConfig` 提供独立预设
 `pi05_pku_franka_collect_objects_dsrl`。它冻结已训练的 VLA，由 SAC 学习噪声；
 训练对象是噪声 actor 和 critic，基础 VLA 仅执行 `infer()`。
+当前 DSRL 仍仅支持绝对动作；本次两种动作表示的扩展只覆盖离线训练。
 
 链路：双相机 + 14 维实测状态 → SAC 输出 `(1,32)` 噪声 → 扩展到 `(30,32)` →
 VLA 生成 `(30,7)` 绝对末端目标 → 每次执行 6 步、30 Hz → 环境奖励/progress → replay → SAC 更新。
@@ -160,22 +182,26 @@ observation = {
     "observation.state.joints": measured_joint_angles,  # (7,), rad
     "prompt": "place each object on the plate that matches its color.",
 }
-actions = policy.infer(observation)["actions"]  # (30, 7), absolute targets
+actions = policy.infer(observation)["actions"]  # (30, 7)，含义由加载的动作版本决定
 ```
 
-输出裁回 7 维，保持绝对目标和 0/1 夹爪约定。执行端需使用支持该格式的笛卡尔目标控制器；
-一次执行多少步由执行端决定。此改动只增加训练配置和数据适配，未启动训练或机器人控制。
+输出裁回 7 维，并保持所选版本的绝对目标/相对增量与 0/1 夹爪约定。
+执行端必须按 checkpoint 对应版本解释前 6 维，不能将绝对目标当增量或将增量当绝对目标。
+一次执行多少步由执行端决定。此改动只增加离线训练配置和数据适配，未启动训练或机器人控制。
 
 ## 已完成的验证
 
-- 7 项 NumPy/标准库单元测试通过，覆盖动作保持、目标字段泄漏、两路图像、指令拼写、
-  推理输入、字段形状，以及失败轨迹筛选和后续新增轨迹。
+- 10 项 NumPy/标准库适配器测试通过，覆盖绝对/相对动作字段选择、夹爪保持、缺少字段时拒绝回退、
+  目标字段泄漏、两路图像、指令拼写、推理输入、字段形状，以及失败轨迹筛选和后续新增轨迹。
 - 读取全部 64 个 Parquet，检查数值有限性、帧数、30 Hz 时间戳以及 target/action 一致性；
   核对全部 128 个视频的帧数和 30 Hz 视频流信息，未发现不一致。
-- 新适配器通过全部 64 条轨迹首/中/尾共 192 个真实数据样本，包含动作块的轨迹末尾补齐；
+- 两种动作适配器通过全部 64 条轨迹首/中/尾共 384 次真实动作块检查，包含轨迹末尾补齐；
   实际解码轨迹 1、22、63 的两路视频首帧，共 6 个视频。
 - Python 语法、注册配置名唯一性及启动脚本语法检查通过。尚未验证完整 OpenPI
   DataLoader / tokenizer / JAX 模型前向和训练更新；采集环境的 LeRobot 命名空间与本仓库不兼容。
 - 新增 IQL 奖励/终止、Filter BC 索引，以及 DSRL 噪声到动作、显式 next observation、
   终止/截断和更新循环测试。progress 使用合成夹具；没有为原始数据伪造标注。
-- SFT / IQL / Filter BC 启动脚本的入口选择、独立统计路径、SFT checkpoint 初始化参数均经过隔离测试。
+- 2026-10-20 在采集环境运行适配器、RL、启动脚本和已有 DSRL 回归共 26 项测试，全部通过。
+  启动脚本测试覆盖 8 个配置的入口与独立统计路径、动作表示冲突和禁止误读另一种表示的统计。
+  8 个配置工厂通过隔离构造验证；IQL/Filter BC 使用临时合成 progress 数据，模型/tokenizer 依赖被隔离。
+  同时修复 macOS Bash 3 在未设置 INIT_CHECKPOINT 时展开空数组的兼容性问题。
