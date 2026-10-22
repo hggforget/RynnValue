@@ -49,6 +49,8 @@ class Args:
 
     # Port to serve the policy on.
     port: int = 8000
+    # Interface to bind; use loopback when connecting through SSH.
+    host: str = "0.0.0.0"
     # Record the policy's behavior for debugging.
     record: bool = False
 
@@ -123,7 +125,9 @@ def create_policy(args: Args) -> _policy.Policy:
 
 def main(args: Args) -> None:
     policy = create_policy(args)
-    policy_metadata = policy.metadata
+    policy_metadata = dict(policy.metadata)
+    if isinstance(args.policy, Checkpoint):
+        policy_metadata.update(config=args.policy.config, checkpoint=args.policy.dir)
 
     # Record the policy's behavior.
     if args.record:
@@ -135,7 +139,7 @@ def main(args: Args) -> None:
 
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=policy,
-        host="0.0.0.0",
+        host=args.host,
         port=args.port,
         metadata=policy_metadata,
     )

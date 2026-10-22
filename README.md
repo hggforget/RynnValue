@@ -270,7 +270,7 @@ RynnValue001/
 │   ├── scripts/                # train.py, train_iql.py, serve_policy.py, launch scripts
 │   ├── configs/                # RL configs (SAC, TD, DAgger, EXPO)
 │   ├── examples/               # libero, droid, aloha, dsrl_sim, dsrl_franka, franka (real robot), …
-│   ├── packages/openpi-client/ # websocket policy client
+│   ├── packages/openpi-client/ # WebSocket client + Franka replay/live inference
 │   └── third_party/jaxrl2/     # vendored jaxrl2 (pi_iql, pixel_iql, pixel_sac)
 ├── tools/
 │   └── convert_rynn_value_lang_to_hf.py   # training ckpt → standalone HF model

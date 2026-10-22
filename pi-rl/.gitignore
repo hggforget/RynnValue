@@ -1,5 +1,6 @@
 # Data directories.
 assets/
+/.runtime/
 checkpoints/
 /data/
 wandb/
