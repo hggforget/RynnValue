@@ -1,5 +1,7 @@
 # PKU Franka FR3 微调
 
+真机推理服务和 Franka client 的启动步骤见 [README_inference.md](README_inference.md)。
+
 2026-10-17 的双相机 collect-objects 数据集请使用
 [独立配置及说明](collect_objects_20261017.md)。它使用绝对末端目标和 0/1 夹爪动作，
 与本文旧单相机数据的动作契约不同。
