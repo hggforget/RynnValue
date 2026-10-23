@@ -3,8 +3,11 @@
 import argparse
 import contextlib
 import json
+import os
 import pathlib
+import signal
 import time
+import urllib.parse
 
 import numpy as np
 
@@ -15,6 +18,21 @@ STATE_DIMS = {
     "observation.state.joints": 7,
 }
 IMAGE_KEYS = ("observation.images.primary", "observation.images.wrist")
+
+
+def create_client(host: str, port: int):
+    """Connect directly to the policy host, bypassing inherited HTTP/SOCKS proxies."""
+    from openpi_client.websocket_client_policy import WebsocketClientPolicy
+
+    hostname = urllib.parse.urlsplit(
+        host if host.startswith(("ws://", "wss://")) else f"ws://{host}"
+    ).hostname
+    if not hostname:
+        raise ValueError(f"Invalid policy host: {host}")
+    for name in ("NO_PROXY", "no_proxy"):
+        previous = os.environ.get(name, "")
+        os.environ[name] = f"{previous},{hostname}" if previous else hostname
+    return WebsocketClientPolicy(host=host, port=port)
 
 
 def prepare_observation(raw: dict, prompt: str = PROMPT) -> dict:
@@ -79,8 +97,8 @@ def iter_dataset_observations(root: pathlib.Path, episode: int, frame: int, coun
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["replay", "inference"], default="replay")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=19080)
+    parser.add_argument("--host", default="219.223.195.77")
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--action-representation", choices=["absolute", "relative"], default="absolute"
     )
@@ -99,6 +117,27 @@ def main() -> None:
     parser.add_argument("--observation-timeout", type=float, default=10.0)
     parser.add_argument("--prompt", default=PROMPT)
     parser.add_argument("--repeat", type=int, default=3)
+    execution = parser.add_mutually_exclusive_group()
+    execution.add_argument(
+        "--execute", action="store_true", help="Execute predictions on the real robot"
+    )
+    execution.add_argument(
+        "--dry-run-execution",
+        action="store_true",
+        help="Plan bounded targets without publishing commands",
+    )
+    parser.add_argument(
+        "--execute-steps",
+        type=int,
+        default=10,
+        help="Chunk prefix to execute before observing again",
+    )
+    parser.add_argument("--control-hz", type=float, default=30.0)
+    parser.add_argument(
+        "--disable-gripper",
+        action="store_true",
+        help="Execute arm targets without gripper commands",
+    )
     parser.add_argument(
         "--output", type=pathlib.Path, help="Save the last returned action chunk as NPY"
     )
@@ -114,9 +153,22 @@ def main() -> None:
         parser.error("replay mode requires --dataset or --observation")
     if args.mode == "inference" and (args.dataset or args.observation):
         parser.error("inference mode reads ROS observations; omit --dataset and --observation")
-    from openpi_client.websocket_client_policy import WebsocketClientPolicy
+    if (args.execute or args.dry_run_execution) and args.mode != "inference":
+        parser.error("action execution requires live inference; replay never controls the robot")
+    if (
+        not 1 <= args.execute_steps <= 30
+        or not np.isfinite(args.control_hz)
+        or not 0 < args.control_hz <= 50
+    ):
+        parser.error("--execute-steps must be 1..30 and --control-hz must be in (0, 50]")
+    if args.execute:
 
-    client = WebsocketClientPolicy(host=args.host, port=args.port)
+        def interrupted(signum, _):
+            raise KeyboardInterrupt(f"Stopping robot execution on signal {signum}")
+
+        signal.signal(signal.SIGTERM, interrupted)
+        signal.signal(signal.SIGHUP, interrupted)
+    client = create_client(host=args.host, port=args.port)
     metadata = client.get_server_metadata()
     expected = "pi05_pku_franka_collect_objects" + (
         "_relative" if args.action_representation == "relative" else ""
@@ -127,20 +179,38 @@ def main() -> None:
         )
     report = {
         "server": metadata,
+        "endpoint": {"host": args.host, "port": args.port},
         "mode": args.mode,
         "action_representation": args.action_representation,
         "dataset": str(args.dataset) if args.dataset else None,
         "observation_file": str(args.observation) if args.observation else None,
         "episode": args.episode if args.dataset else None,
         "frame": args.frame if args.dataset else None,
+        "execution_enabled": args.execute,
+        "execution_dry_run": args.dry_run_execution,
+        "gripper_commands_enabled": not args.disable_gripper,
         "requests": [],
     }
     with contextlib.ExitStack() as stack:
+        executor = None
         if args.mode == "inference":
             from openpi_client.franka_collect.live_observation import LiveObservationReader
 
             reader = stack.enter_context(LiveObservationReader(args.namespace, args.env_config))
             report["topics"] = reader.topics
+            if args.execute or args.dry_run_execution:
+                from openpi_client.franka_collect.action_execution import ActionExecutor
+
+                executor = stack.enter_context(
+                    ActionExecutor(
+                        reader,
+                        args.action_representation,
+                        args.execute_steps,
+                        args.control_hz,
+                        dry_run=args.dry_run_execution,
+                        control_gripper=not args.disable_gripper,
+                    )
+                )
             observations = (reader.get_obs(args.observation_timeout) for _ in range(args.repeat))
         elif args.dataset:
             observations = iter_dataset_observations(
@@ -174,6 +244,8 @@ def main() -> None:
             if args.dataset:
                 timing["frame"] = args.frame + index * args.frame_step
             timing["server_infer_ms"] = round(result.get("server_timing", {}).get("infer_ms", 0), 3)
+            if executor is not None:
+                timing["execution"] = executor.execute(actions)
             report["requests"].append(timing)
             print(json.dumps(timing), flush=True)
     report["first_action"] = actions[0].tolist()

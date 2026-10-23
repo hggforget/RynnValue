@@ -49,7 +49,7 @@ class Args:
 
     # Port to serve the policy on.
     port: int = 8000
-    # Interface to bind; use loopback when connecting through SSH.
+    # Network interface to bind for incoming WebSocket connections.
     host: str = "0.0.0.0"
     # Record the policy's behavior for debugging.
     record: bool = False

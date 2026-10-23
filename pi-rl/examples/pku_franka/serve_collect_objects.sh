@@ -23,5 +23,5 @@ esac
 CHECKPOINT="${CHECKPOINT:-$MODEL_ROOT/$CONFIG/$EXPERIMENT/19999}"
 cd "$PROJECT_ROOT"
 exec "${PYTHON:-$PROJECT_ROOT/.venv/bin/python}" scripts/serve_policy.py \
-    --host "${BIND_HOST:-127.0.0.1}" --port "${PORT:-$DEFAULT_PORT}" \
+    --host "${BIND_HOST:-219.223.195.77}" --port "${PORT:-$DEFAULT_PORT}" \
     policy:checkpoint --policy.config "$CONFIG" --policy.dir "$CHECKPOINT" "$@"

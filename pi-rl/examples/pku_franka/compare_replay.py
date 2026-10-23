@@ -15,9 +15,9 @@ DIMENSIONS = ("x", "y", "z", "roll", "pitch", "yaw", "gripper")
 
 
 def collect(args):
+    from openpi_client.franka_collect.client import create_client
     from openpi_client.franka_collect.client import iter_dataset_observations
     from openpi_client.franka_collect.client import prepare_observation
-    from openpi_client.websocket_client_policy import WebsocketClientPolicy
     import pyarrow.parquet as pq
 
     dataset = args.dataset.expanduser().resolve()
@@ -49,7 +49,7 @@ def collect(args):
         arrays[f"{mode}_round_trip_ms"] = np.empty(len(frames))
         arrays[f"{mode}_server_infer_ms"] = np.empty(len(frames))
         port = args.absolute_port if mode == "absolute" else args.relative_port
-        clients[mode] = WebsocketClientPolicy(host=args.host, port=port)
+        clients[mode] = create_client(host=args.host, port=port)
         server = clients[mode].get_server_metadata()
         expected = "pi05_pku_franka_collect_objects" + ("_relative" if mode == "relative" else "")
         if server.get("config") != expected:
@@ -245,9 +245,9 @@ def main():
     record.add_argument("--dataset", type=Path, required=True)
     record.add_argument("--episode", type=int, default=1)
     record.add_argument("--frame-step", type=int, default=1)
-    record.add_argument("--host", default="127.0.0.1")
-    record.add_argument("--absolute-port", type=int, default=19080)
-    record.add_argument("--relative-port", type=int, default=19081)
+    record.add_argument("--host", default="219.223.195.77")
+    record.add_argument("--absolute-port", type=int, default=8000)
+    record.add_argument("--relative-port", type=int, default=8001)
     record.add_argument("--output", type=Path, required=True)
     record.set_defaults(run=collect)
     draw = commands.add_parser("plot", help="Draw aligned first-step curves from a collected NPZ")

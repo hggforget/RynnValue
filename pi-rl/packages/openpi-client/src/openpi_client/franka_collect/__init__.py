@@ -1,1 +1,1 @@
-"""Pi0.5 collect-objects inference, with replay and passive ROS observation modes."""
+"""Pi0.5 collect-objects replay, live inference and opt-in Cartesian execution."""

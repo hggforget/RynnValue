@@ -186,7 +186,7 @@ actions = policy.infer(observation)["actions"]  # (30, 7)，含义由加载的�
 
 ## 跨机推理
 
-推理服务、SSH 隧道、replay / inference 客户端和验证程序均实现在本项目中。
+推理服务、replay / inference 客户端和验证程序均实现在本项目中，通过服务器 IP 直接连接 WebSocket。
 完整命令见 [跨机推理说明](inference.md)。模型服务复用 `scripts/serve_policy.py`，
 轻量客户端位于 `packages/openpi-client/src/openpi_client/franka_collect/`。
 
@@ -218,3 +218,13 @@ actions = policy.infer(observation)["actions"]  # (30, 7)，含义由加载的�
   每帧第 1 步与同帧标签对齐后，绝对动作 XYZ MAE 分别为 4.69 / 4.39 / 3.87 mm，
   相对动作 XYZ MAE 为 1.63 / 1.28 / 1.49 mm。`compare_replay.py` 可复现采样、PNG/PDF 曲线、
   CSV 和误差统计；结果反映录制观测下的离线动作拟合。
+- 2026-10-23：切换为 Franka 直接连接 `219.223.195.77:8000/8001`，停止旧隧道并移除启动脚本。
+  两套 checkpoint 共 60 次直连 replay、双模型曲线采样和隔离 ROS 实时推理均通过。
+  `run_franka.sh` 集中常用参数，默认实时观测推理，可用 `replay` 切换录制数据。
+- 新增显式启用的 Cartesian / 夹爪执行桥：`EXECUTE=1` 执行动作块前缀，
+  `DRY_RUN=1` 只规划目标。20 项客户端及执行规划测试通过；隔离 ROS 控制器、夹爪 action server
+  验证激活、目标发布和退出保持。真实观测推理及目标干跑已通过，尚未执行真机运动验收。
+- 对照 `data_collection_web` 使用的真实采集环境修复执行差异：相对动作限幅后不追赶旧增量，
+  工作空间沿用有效 `safety_box`，夹爪检查最终结果并限制单个未完成目标，动作块间复核控制器状态。
+  30 项回归测试通过，新增 `check_collection_compatibility.py` 对照真实 `env.step()`；
+  隔离 ROS 故障注入和真机观测干跑验证不发送真机运动。

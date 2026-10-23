@@ -13,7 +13,7 @@ This is an experiment: $\pi_0$ was developed for our own robots, which differ fr
 
 ## FR3 collect-objects inference
 
-Pi0.5 checkpoint serving, the SSH connection, and the Franka replay/live-observation client are implemented in this project. See the [cross-machine inference guide](examples/pku_franka/inference.md).
+Pi0.5 checkpoint serving and the Franka replay/live-observation client connect directly over WebSocket. See the [cross-machine inference guide](examples/pku_franka/inference.md).
 
 ## Updates
 

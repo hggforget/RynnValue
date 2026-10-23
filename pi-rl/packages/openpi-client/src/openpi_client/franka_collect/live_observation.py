@@ -22,6 +22,7 @@ class LiveObservationReader:
         from sensor_msgs.msg import CompressedImage, JointState
 
         config = make_env_config(env_config)
+        self.config = config
         cameras = {camera.camera_name: camera for camera in config.camera_configs}
         if not {"primary", "wrist"}.issubset(cameras):
             raise ValueError("Pi0.5 collect-objects inference requires primary and wrist cameras")
@@ -64,6 +65,30 @@ class LiveObservationReader:
             self.node.create_subscription(
                 message_type, name, functools.partial(self._receive, key), qos
             )
+
+    def spin_for(self, duration):
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            self.executor.spin_once(timeout_sec=min(0.02, max(0, deadline - time.monotonic())))
+
+    def get_sample(self, key, timeout=0.25):
+        """Read a fresh measured value while servicing control callbacks."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.executor.spin_once(timeout_sec=0.005)
+            for _ in self.topics:
+                self.executor.spin_once(timeout_sec=0)
+            sample = self._samples.get(key)
+            if sample is not None:
+                value, received, stamp = sample
+                ros_now = self.node.get_clock().now().nanoseconds * 1e-9
+                if (
+                    stamp > 0
+                    and time.monotonic() - received <= self.max_age
+                    and 0 <= ros_now - stamp <= self.max_age
+                ):
+                    return value.copy()
+        raise TimeoutError(f"No fresh control feedback: {key}")
 
     def _receive(self, key, message):
         try:

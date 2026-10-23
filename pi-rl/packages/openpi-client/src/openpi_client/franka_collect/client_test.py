@@ -85,3 +85,26 @@ assert not {'jax', 'torch', 'openpi', 'rclpy', 'crisp_gym'} & sys.modules.keys()
     )
     assert result.returncode == 0, result.stderr
     assert "usage:" in result.stdout
+
+
+@pytest.mark.parametrize("option", ["--execute", "--dry-run-execution"])
+def test_replay_rejects_execution_before_loading_any_ros_dependencies(option):
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "openpi_client.franka_collect.client",
+            "--mode",
+            "replay",
+            "--dataset",
+            "/unused-dataset",
+            option,
+        ],
+        env={**os.environ, "PYTHONPATH": str(root)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "replay never controls the robot" in result.stderr
