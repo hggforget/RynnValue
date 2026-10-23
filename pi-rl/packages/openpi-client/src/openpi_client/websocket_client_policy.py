@@ -1,5 +1,6 @@
 # adapted from openpi
 import logging
+import socket
 import time
 from typing import Dict, Optional, Tuple
 
@@ -16,7 +17,8 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
     See WebsocketPolicyServer for a corresponding server implementation.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: Optional[int] = None, api_key: Optional[str] = None) -> None:
+    def __init__(self, host: str = "0.0.0.0", port: Optional[int] = None,
+                 api_key: Optional[str] = None, *, retry: bool = True) -> None:
         if host.startswith("ws"):
             self._uri = host
         else:
@@ -25,6 +27,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
             self._uri += f":{port}"
         self._packer = msgpack_numpy.Packer()
         self._api_key = api_key
+        self._retry = retry
         self._ws, self._server_metadata = self._wait_for_server()
 
     def get_server_metadata(self) -> Dict:
@@ -38,11 +41,25 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 conn = websockets.sync.client.connect(
                     self._uri, compression=None, max_size=None, additional_headers=headers
                 )
-                metadata = msgpack_numpy.unpackb(conn.recv())
+                try:
+                    metadata = msgpack_numpy.unpackb(conn.recv(timeout=None if self._retry else 10))
+                except BaseException:
+                    conn.close()
+                    raise
                 return conn, metadata
             except ConnectionRefusedError:
+                if not self._retry:
+                    raise
                 logging.info("Still waiting for server...")
                 time.sleep(5)
+
+    def close(self) -> None:
+        """Interrupt pending I/O so an operator judgment can stop waiting immediately."""
+        try:
+            self._ws.socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self._ws.close()
 
     @override
     def infer(self, obs: Dict) -> Dict:  # noqa: UP006

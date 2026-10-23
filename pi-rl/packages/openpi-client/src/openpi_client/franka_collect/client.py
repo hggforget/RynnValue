@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import signal
+import sys
 import time
 import urllib.parse
 
@@ -20,7 +21,7 @@ STATE_DIMS = {
 IMAGE_KEYS = ("observation.images.primary", "observation.images.wrist")
 
 
-def create_client(host: str, port: int):
+def create_client(host: str, port: int, *, retry=True):
     """Connect directly to the policy host, bypassing inherited HTTP/SOCKS proxies."""
     from openpi_client.websocket_client_policy import WebsocketClientPolicy
 
@@ -32,7 +33,7 @@ def create_client(host: str, port: int):
     for name in ("NO_PROXY", "no_proxy"):
         previous = os.environ.get(name, "")
         os.environ[name] = f"{previous},{hostname}" if previous else hostname
-    return WebsocketClientPolicy(host=host, port=port)
+    return WebsocketClientPolicy(host=host, port=port, retry=retry)
 
 
 def prepare_observation(raw: dict, prompt: str = PROMPT) -> dict:
@@ -117,6 +118,18 @@ def main() -> None:
     parser.add_argument("--observation-timeout", type=float, default=10.0)
     parser.add_argument("--prompt", default=PROMPT)
     parser.add_argument("--repeat", type=int, default=3)
+    parser.add_argument(
+        "--attempts",
+        type=int,
+        default=0,
+        help="Operator-judged attempts; 0 uses the legacy request loop",
+    )
+    parser.add_argument(
+        "--attempt-timeout",
+        type=float,
+        default=300,
+        help="Maximum elapsed seconds per evaluation attempt",
+    )
     execution = parser.add_mutually_exclusive_group()
     execution.add_argument(
         "--execute", action="store_true", help="Execute predictions on the real robot"
@@ -145,6 +158,17 @@ def main() -> None:
         "--report", type=pathlib.Path, help="Save validation and timing information as JSON"
     )
     args = parser.parse_args()
+    if args.attempts < 0:
+        parser.error("--attempts must be nonnegative")
+    if not np.isfinite(args.attempt_timeout) or args.attempt_timeout <= 0:
+        parser.error("attempt timeout must be positive and finite")
+    if args.attempts:
+        if args.mode != "inference" or not args.execute:
+            parser.error("evaluation requires live execution (--mode inference --execute)")
+        if args.disable_gripper:
+            parser.error("evaluation requires gripper control for reset; omit --disable-gripper")
+        if not sys.stdin.isatty():
+            parser.error("evaluation requires a terminal for s/f/r input; use SSH -tt")
     if args.repeat < 1:
         parser.error("--repeat must be positive")
     if args.frame_step < 1 or args.observation_timeout <= 0:
@@ -168,6 +192,11 @@ def main() -> None:
 
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGHUP, interrupted)
+    if args.attempts:
+        from openpi_client.franka_collect.evaluation import run_evaluation
+
+        run_evaluation(args)
+        return
     client = create_client(host=args.host, port=args.port)
     metadata = client.get_server_metadata()
     expected = "pi05_pku_franka_collect_objects" + (
@@ -193,6 +222,7 @@ def main() -> None:
     }
     with contextlib.ExitStack() as stack:
         executor = None
+        controls = None
         if args.mode == "inference":
             from openpi_client.franka_collect.live_observation import LiveObservationReader
 
@@ -211,6 +241,10 @@ def main() -> None:
                         control_gripper=not args.disable_gripper,
                     )
                 )
+                if args.execute:
+                    from openpi_client.franka_collect.terminal_control import TerminalControl
+
+                    controls = stack.enter_context(TerminalControl(reader))
             observations = (reader.get_obs(args.observation_timeout) for _ in range(args.repeat))
         elif args.dataset:
             observations = iter_dataset_observations(
@@ -222,6 +256,9 @@ def main() -> None:
                 raw = dict(arrays)
             observations = (raw for _ in range(args.repeat))
         for index, raw in enumerate(observations):
+            if controls is not None and controls.poll():
+                controls.wait(executor)
+                raw = reader.get_obs(args.observation_timeout)
             observation = prepare_observation(raw, args.prompt)
             report["inputs"] = {
                 key: {"shape": list(value.shape), "dtype": str(value.dtype)}
@@ -245,9 +282,13 @@ def main() -> None:
                 timing["frame"] = args.frame + index * args.frame_step
             timing["server_infer_ms"] = round(result.get("server_timing", {}).get("infer_ms", 0), 3)
             if executor is not None:
-                timing["execution"] = executor.execute(actions)
+                timing["execution"] = executor.execute(
+                    actions, should_pause=controls.poll if controls is not None else None
+                )
             report["requests"].append(timing)
             print(json.dumps(timing), flush=True)
+            if controls is not None and timing["execution"]["paused"]:
+                controls.wait(executor)
     report["first_action"] = actions[0].tolist()
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

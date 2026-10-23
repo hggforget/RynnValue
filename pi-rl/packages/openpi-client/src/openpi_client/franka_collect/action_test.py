@@ -40,7 +40,7 @@ def check_robot_service(robot_host):
     if robot.get("running") is not True:
         raise RuntimeError(
             "Robot driver is stopped; start robot in data_collection_web before retrying. "
-            "A failed/interrupted execution test stops this driver. No actions sent."
+            "No actions sent."
         )
     return robot
 
@@ -358,39 +358,7 @@ def main():
         "client_command": client,
         "metadata": policy.metadata,
     }
-    armed = False
-
-    def stop_remote_robot():
-        nonlocal armed
-        if not armed:
-            return
-        armed = False
-        print("STOP: requesting Franka robot driver shutdown", flush=True)
-        response = subprocess.run(
-            [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=3",
-                args.robot_host,
-                "curl --noproxy '*' --max-time 8 -fsS -X POST "
-                "-H 'Content-Type: application/json' -d '{}' "
-                "http://127.0.0.1:8766/api/service/robot/stop",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=12,
-        )
-        result = json.loads(response.stdout)
-        if result.get("running") is not False:
-            raise RuntimeError(f"Robot driver stop was not confirmed: {result}")
-        report["robot_driver_stopped"] = True
-        print("STOP: Franka robot driver stopped", flush=True)
-
     def interrupted(signum, _):
-        stop_remote_robot()
         raise KeyboardInterrupt(f"Stopping action test on signal {signum}")
 
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -408,11 +376,10 @@ def main():
     try:
         report["robot_service_before_test"] = check_robot_service(args.robot_host)
         if args.execute:
-            print("Ctrl+C stops the test AND the robot driver", flush=True)
+            print("Ctrl+C stops the action test client", flush=True)
             for remaining in range(args.countdown, 0, -1):
                 print(f"Starting real robot test in {remaining}s", flush=True)
                 time.sleep(1)
-            armed = True
         run_client_session(policy, command, directory, args.host, args.port)
         result = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", args.robot_host, "cat " + shlex.quote(remote_report)],
@@ -429,7 +396,6 @@ def main():
             raise RuntimeError("Measured motion did not meet the execution test tolerances")
     except BaseException as exc:
         report["error"] = str(exc)
-        stop_remote_robot()
         raise
     finally:
         report["records"] = policy.records

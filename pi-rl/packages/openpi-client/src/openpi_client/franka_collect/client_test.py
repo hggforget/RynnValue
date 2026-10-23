@@ -108,3 +108,57 @@ def test_replay_rejects_execution_before_loading_any_ros_dependencies(option):
     )
     assert result.returncode == 2
     assert "replay never controls the robot" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments,message",
+    [
+        (
+            ["--mode", "replay", "--dataset", "/unused", "--attempts", "1"],
+            "evaluation requires live execution",
+        ),
+        (
+            ["--mode", "inference", "--execute", "--attempts", "1", "--attempt-timeout", "0"],
+            "attempt timeout must be positive",
+        ),
+        (
+            ["--mode", "inference", "--execute", "--attempts", "1", "--disable-gripper"],
+            "evaluation requires gripper control",
+        ),
+        (["--mode", "inference", "--execute", "--attempts", "1"], "evaluation requires a terminal"),
+    ],
+)
+def test_evaluation_rejects_invalid_setup_before_loading_hardware(arguments, message):
+    source = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-m", "openpi_client.franka_collect.client", *arguments],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={**os.environ, "PYTHONPATH": str(source)},
+    )
+    assert result.returncode == 2 and message in result.stderr
+
+
+def test_execution_launcher_passes_attempt_count_and_five_minute_limit(tmp_path):
+    root = Path(__file__).resolve().parents[5]
+    runtime = tmp_path / "runtime.sh"
+    runtime.write_text("#!/bin/bash\nprintf '%s\\n' \"$@\"\n")
+    result = subprocess.run(
+        ["bash", str(root / "examples/pku_franka/run_franka.sh"), "inference"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={
+            **os.environ,
+            "ROBOT_RUNTIME": str(runtime),
+            "EXECUTE": "1",
+            "DRY_RUN": "0",
+            "ATTEMPTS": "7",
+            "RUN_DIR": str(tmp_path / "run"),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--attempts\n7\n" in result.stdout
+    assert "--attempt-timeout\n300\n" in result.stdout

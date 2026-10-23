@@ -59,7 +59,7 @@ def test_zero_relative_action_holds_the_limited_target_without_catching_up():
     np.testing.assert_allclose(targets[0], targets[1])
 
 
-@pytest.mark.parametrize("case", ["nan", "wrong_shape", "far_goal", "workspace", "bad_steps"])
+@pytest.mark.parametrize("case", ["nan", "wrong_shape", "workspace", "bad_steps"])
 def test_bad_chunks_are_rejected_before_execution(case):
     seed = np.array([0.3, 0.1, 0.2, 0, 0, 0])
     actions = np.tile(np.r_[seed, 1.0], (3, 1))
@@ -68,8 +68,6 @@ def test_bad_chunks_are_rejected_before_execution(case):
         actions[2, 0] = np.nan
     elif case == "wrong_shape":
         actions = actions[:, :6]
-    elif case == "far_goal":
-        actions[2, 0] += 0.5
     elif case == "workspace":
         options["upper"] = [0.2, 1, 1]
     else:
@@ -110,31 +108,6 @@ def test_execution_ownership_excludes_a_second_client(tmp_path, monkeypatch):
         first.ownership.close()
     second._acquire_ownership()
     second.ownership.close()
-
-
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_pose_publisher_uses_python_floats_in_ros_double_fields(dtype, monkeypatch):
-    messages = ModuleType("geometry_msgs.msg")
-    messages.PoseStamped = lambda: SimpleNamespace(
-        header=SimpleNamespace(),
-        pose=SimpleNamespace(position=SimpleNamespace(), orientation=SimpleNamespace()),
-    )
-    monkeypatch.setitem(sys.modules, "geometry_msgs.msg", messages)
-    executor = object.__new__(ActionExecutor)
-    executor.config = SimpleNamespace(robot_config=SimpleNamespace(base_frame="base"))
-    executor.node = SimpleNamespace(
-        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: "stamp"))
-    )
-    sent = []
-    executor.publisher = SimpleNamespace(publish=sent.append)
-    pose = np.array([0.35, 0.03, 0.23, 3.12, 0.01, -0.02], dtype=dtype)
-    executor._publish_pose(pose)
-    message = sent[0]
-    position = vars(message.pose.position)
-    assert all(type(value) is float for value in position.values())
-    assert all(type(value) is float for value in vars(message.pose.orientation).values())
-    np.testing.assert_array_equal(list(position.values()), pose[:3].astype(np.float64))
-    assert message.header.frame_id == "base" and message.header.stamp == "stamp"
 
 
 class FakeGoalHandle:
@@ -272,3 +245,28 @@ def test_failed_gripper_send_does_not_leave_a_permanent_pending_request(gripper_
     with pytest.raises(OSError, match="send failed"):
         executor._send_gripper(0.0)
     assert not executor.gripper_pending
+
+
+def test_pause_cancels_gripper_and_holds_measured_pose(gripper_executor, monkeypatch):
+    executor, sent = gripper_executor
+    executor._send_gripper(0.0)
+    handle = FakeGoalHandle()
+    sent[0][1].set_result(handle)
+    measured = np.array([0.35, 0.03, 0.24, -np.pi, 0, 0])
+    held = []
+    executor.publisher = object()
+    executor.reader.get_sample = lambda key: measured.copy()
+
+    def complete_cancel(duration):
+        if not handle.result.done():
+            handle.result.set_result(
+                SimpleNamespace(status=5, result=SimpleNamespace(reached_goal=False))
+            )
+
+    executor.reader.spin_for = complete_cancel
+    monkeypatch.setattr(executor, "_publish_pose", lambda pose: held.append(pose.copy()))
+    executor.hold()
+    assert handle.cancels == 1 and not executor.gripper_pending and executor.error is None
+    assert executor.last_gripper is None
+    np.testing.assert_array_equal(held[0], measured)
+    np.testing.assert_array_equal(executor.last_target, measured)

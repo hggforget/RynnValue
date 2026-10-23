@@ -10,7 +10,13 @@ class LiveObservationReader:
     """Subscribe to the same pose, joints, gripper and cameras used during collection."""
 
     def __init__(
-        self, namespace="left", env_config="fr3_dual_cam_640x480", max_age=0.25, max_skew=0.1
+        self,
+        namespace="left",
+        env_config="fr3_dual_cam_640x480",
+        max_age=0.25,
+        max_skew=0.1,
+        *,
+        include_cameras=True,
     ):
         import rclpy
         from crisp_gym.envs.manipulator_env_config import make_env_config
@@ -23,9 +29,6 @@ class LiveObservationReader:
 
         config = make_env_config(env_config)
         self.config = config
-        cameras = {camera.camera_name: camera for camera in config.camera_configs}
-        if not {"primary", "wrist"}.issubset(cameras):
-            raise ValueError("Pi0.5 collect-objects inference requires primary and wrist cameras")
         self.joint_names = config.robot_config.joint_names
         self.gripper_config = config.gripper_config
         self.max_age = max_age
@@ -42,12 +45,20 @@ class LiveObservationReader:
             "observation.state.cartesian": topic(config.robot_config.current_pose_topic),
             "observation.state.joints": topic(config.robot_config.current_joint_topic),
             "observation.state.gripper": topic(config.gripper_config.joint_state_topic),
-            **{
-                f"observation.images.{name}": topic(cameras[name].camera_color_image_topic)
-                + "/compressed"
-                for name in ("primary", "wrist")
-            },
         }
+        if include_cameras:
+            cameras = {camera.camera_name: camera for camera in config.camera_configs}
+            if not {"primary", "wrist"}.issubset(cameras):
+                raise ValueError(
+                    "Pi0.5 collect-objects inference requires primary and wrist cameras"
+                )
+            self.topics.update(
+                {
+                    f"observation.images.{name}": topic(cameras[name].camera_color_image_topic)
+                    + "/compressed"
+                    for name in ("primary", "wrist")
+                }
+            )
         self.context = Context()
         rclpy.init(context=self.context)
         self.node = rclpy.create_node(
@@ -125,10 +136,12 @@ class LiveObservationReader:
             self._samples.pop(key, None)
             self._errors[key] = str(exc)
 
-    def get_obs(self, timeout=10.0):
+    def get_obs(self, timeout=10.0, *, should_stop=None):
         deadline = time.monotonic() + timeout
         fresh = {}
         while time.monotonic() < deadline:
+            if should_stop is not None and should_stop():
+                return None
             self.executor.spin_once(timeout_sec=min(0.03, max(0, deadline - time.monotonic())))
             # Drain queued sensor messages before taking a snapshot.
             for _ in self.topics:
@@ -138,18 +151,25 @@ class LiveObservationReader:
             fresh = {}
             stamps = []
             for key, (value, received, stamp) in self._samples.items():
-                if received <= self._last_returned or now - received > self.max_age:
+                if received <= self._last_returned:
                     continue
-                if stamp <= 0 or not 0 <= ros_now - stamp <= self.max_age:
-                    continue
+                # Camera transport latency does not gate inference. Require an image
+                # update, but apply age and timestamp synchronization only to robot state.
+                if ".images." not in key:
+                    if now - received > self.max_age:
+                        continue
+                    if stamp <= 0 or not 0 <= ros_now - stamp <= self.max_age:
+                        continue
+                    stamps.append(stamp)
                 fresh[key] = value
-                stamps.append(stamp)
             if len(fresh) == len(self.topics) and max(stamps) - min(stamps) <= self.max_skew:
                 self._last_returned = now
                 return {key: value.copy() for key, value in fresh.items()}
+        if should_stop is not None and should_stop():
+            return None
         missing = [f"{key} ({topic})" for key, topic in self.topics.items() if key not in fresh]
         if not missing:
-            missing = [f"sensor timestamps differ by more than {self.max_skew}s"]
+            missing = [f"robot state timestamps differ by more than {self.max_skew}s"]
         raise TimeoutError(
             f"Missing/stale ROS observations after {timeout}s: {missing}; errors: {self._errors}"
         )

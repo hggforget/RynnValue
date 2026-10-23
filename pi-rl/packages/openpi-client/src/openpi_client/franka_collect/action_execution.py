@@ -15,10 +15,6 @@ from scipy.spatial.transform import Rotation
 class ExecutionLimits:
     max_step_m: float = 0.005
     max_step_rad: float = 0.03
-    max_tracking_m: float = 0.03
-    max_tracking_rad: float = 0.25
-    max_goal_m: float = 0.10
-    max_goal_rad: float = 0.75
 
     def __post_init__(self):
         if any(not np.isfinite(value) or value <= 0 for value in vars(self).values()):
@@ -62,10 +58,6 @@ def plan_targets(actions, seed, representation, steps=10, limits=None, lower=Non
         delta = desired_position - position
         rotation_delta = (desired_rotation * rotation.inv()).as_rotvec()
         distance, angle = np.linalg.norm(delta), np.linalg.norm(rotation_delta)
-        if distance > limits.max_goal_m or angle > limits.max_goal_rad:
-            raise ValueError(
-                f"Model target too far from current command: {distance:.4f} m / {angle:.4f} rad"
-            )
         if np.any(desired_position < lower) or np.any(desired_position > upper):
             raise ValueError(
                 f"Model target outside configured workspace: {desired_position.tolist()}"
@@ -108,6 +100,7 @@ class ActionExecutor:
         self.gripper_pending = False
         self.gripper_sent_at = None
         self.gripper_cancel_future = None
+        self.gripper_cancel_requested = False
         self.closing = False
         self.last_gripper = None
         self.error = None
@@ -268,7 +261,7 @@ class ActionExecutor:
                 self.gripper_goal = handle
                 self.last_gripper = value
                 handle.get_result_async().add_done_callback(self._gripper_completed)
-                if self.closing:
+                if self.closing or self.gripper_cancel_requested:
                     self._cancel_gripper()
             except Exception as exc:
                 self.gripper_pending = False
@@ -286,8 +279,10 @@ class ActionExecutor:
 
         try:
             response = future.result()
-            canceled_on_exit = self.closing and response.status == GoalStatus.STATUS_CANCELED
-            if not canceled_on_exit and (
+            canceled_by_client = (
+                self.closing or self.gripper_cancel_requested
+            ) and response.status == GoalStatus.STATUS_CANCELED
+            if not canceled_by_client and (
                 response.status != GoalStatus.STATUS_SUCCEEDED or not response.result.reached_goal
             ):
                 raise RuntimeError(
@@ -300,6 +295,7 @@ class ActionExecutor:
             self.gripper_goal = None
             self.gripper_pending = False
             self.gripper_cancel_future = None
+            self.gripper_cancel_requested = False
 
     def _check_gripper(self):
         if self.error:
@@ -310,23 +306,115 @@ class ActionExecutor:
                 raise TimeoutError(f"Gripper action timed out after {timeout}s")
 
     def _cancel_gripper(self):
+        if self.gripper_pending:
+            self.gripper_cancel_requested = True
         if self.gripper_goal is not None and self.gripper_cancel_future is None:
             self.gripper_cancel_future = self.gripper_goal.cancel_goal_async()
 
-    def _check_tracking(self, commanded, measured):
-        distance, angle = pose_error(commanded, measured)
-        if distance > self.limits.max_tracking_m or angle > self.limits.max_tracking_rad:
-            raise RuntimeError(
-                f"Robot tracking error too large: {distance:.4f} m / {angle:.4f} rad"
-            )
+    def hold(self):
+        """Hold measured pose and stop unfinished gripper motion, retaining ownership."""
+        if self.publisher is not None:
+            measured = self.reader.get_sample("observation.state.cartesian")
+            self._publish_pose(measured)
+            self.last_target = measured.copy()
+        self._cancel_gripper()
+        deadline = time.monotonic() + 2
+        while self.gripper_pending and time.monotonic() < deadline:
+            self.reader.spin_for(0.02)
+        if self.gripper_pending:
+            raise TimeoutError("Gripper pause was not confirmed")
+        self._check_gripper()
+        self.last_gripper = None
 
-    def execute(self, actions):
+    def _execute_targets(self, targets, *, control_hz=None, should_pause=None):
+        frequency = self.control_hz if control_hz is None else control_hz
+        executed = 0
+        for target in targets:
+            if should_pause is not None and should_pause():
+                return executed, True
+            start = time.monotonic()
+            self._check_gripper()
+            if self.node.count_publishers(self.topics["pose"]) > 1:
+                raise RuntimeError("Another target publisher appeared during execution")
+            self.reader.get_sample("observation.state.cartesian")
+            self._publish_pose(target[:6])
+            self.last_target = target[:6].copy()
+            if self.control_gripper:
+                self._send_gripper(float(target[6]))
+            executed += 1
+            self.reader.spin_for(max(0, 1 / frequency - (time.monotonic() - start)))
+        self._check_gripper()
+        return executed, False
+
+    def reset_to_pose(self, target_pose, timeout=30.0, observation_timeout=10.0):
+        """Open the gripper, then return to an absolute pose using measured arrival."""
+        if not self.control_gripper:
+            raise ValueError("Reset requires gripper control; omit --disable-gripper")
+        target_pose = np.asarray(target_pose, dtype=np.float64)
+        if target_pose.shape != (6,) or not np.isfinite(target_pose).all():
+            raise ValueError("Expected a finite reset pose [6]")
+        if any(not np.isfinite(value) or value <= 0 for value in (timeout, observation_timeout)):
+            raise ValueError("Reset timeouts must be finite and positive")
+        measured = self.reader.get_sample(
+            "observation.state.cartesian", timeout=observation_timeout
+        )
+        limits = ExecutionLimits(max_step_m=0.003, max_step_rad=0.02)
+        action = np.r_[target_pose, 1.0][None, :]
+        preview = plan_targets(action, measured, "absolute", 1, limits, self.lower, self.upper)
+        report = {
+            "target_pose": target_pose.tolist(),
+            "initial_pose": measured.tolist(),
+            "dry_run": self.dry_run,
+            "reached": False,
+            "control_hz": 10,
+            "planned_targets": preview.tolist(),
+            "steps_executed": 0,
+        }
+        if self.dry_run:
+            return report
+        started = time.monotonic()
+        deadline = started + timeout
+        if self.publisher is None:
+            self._prepare(measured)
+        else:
+            self.hold()
+            self._check_controller()
+        measured = self.reader.get_sample("observation.state.cartesian")
+        self._execute_targets(np.r_[measured, 1.0][None, :], control_hz=10)
+        while self.gripper_pending:
+            self._check_gripper()
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Timed out opening gripper for reset")
+            self.reader.spin_for(0.02)
+        while True:
+            self._check_gripper()
+            measured = self.reader.get_sample("observation.state.cartesian")
+            distance, angle = pose_error(measured, target_pose)
+            if distance <= 0.02 and angle <= np.deg2rad(2):
+                report.update(
+                    reached=True,
+                    final_pose=measured.tolist(),
+                    elapsed_s=round(time.monotonic() - started, 3),
+                )
+                return report
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out during reset: pose error {distance:.4f} m / {angle:.4f} rad"
+                )
+            self._check_controller()
+            targets = plan_targets(
+                action, self.last_target, "absolute", 1, limits, self.lower, self.upper
+            )
+            self._execute_targets(targets, control_hz=10)
+            report["steps_executed"] += 1
+
+    def execute(self, actions, *, should_pause=None):
         measured = self.reader.get_sample("observation.state.cartesian")
         seed = measured if self.last_target is None else self.last_target
-        self._check_tracking(seed, measured)
         targets = plan_targets(
             actions, seed, self.representation, self.steps, self.limits, self.lower, self.upper
         )
+        executed, paused = 0, False
         if not self.dry_run:
             if self.publisher is None:
                 self._prepare(measured)
@@ -341,24 +429,11 @@ class ActionExecutor:
                 )
             else:
                 self._check_controller()
-            for target in targets:
-                start = time.monotonic()
-                self._check_gripper()
-                if self.node.count_publishers(self.topics["pose"]) > 1:
-                    raise RuntimeError("Another target publisher appeared during execution")
-                measured = self.reader.get_sample("observation.state.cartesian")
-                self._check_tracking(
-                    seed if self.last_target is None else self.last_target, measured
-                )
-                self._publish_pose(target[:6])
-                self.last_target = target[:6].copy()
-                if self.control_gripper:
-                    self._send_gripper(float(target[6]))
-                self.reader.spin_for(max(0, 1 / self.control_hz - (time.monotonic() - start)))
-            self._check_gripper()
+            executed, paused = self._execute_targets(targets, should_pause=should_pause)
         return {
             "dry_run": self.dry_run,
-            "steps_executed": 0 if self.dry_run else len(targets),
+            "steps_executed": executed,
+            "paused": paused,
             "planned_targets": targets.tolist(),
             "control_hz": self.control_hz,
             "gripper_commands_enabled": self.control_gripper,

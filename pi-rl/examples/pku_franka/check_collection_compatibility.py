@@ -45,7 +45,7 @@ def assert_same(first, second):
 def main():
     config = make_env_config("fr3_dual_cam_640x480")
     seed = np.array([0.3, 0.1, 0.2, 0.25, -0.15, 0.4])
-    limits = ExecutionLimits(max_step_m=1, max_step_rad=1, max_goal_m=1, max_goal_rad=2)
+    limits = ExecutionLimits(max_step_m=1, max_step_rad=1)
     for representation in ("absolute", "relative"):
         actions = np.array([[0.002, -0.001, 0.003, 0.01, -0.02, 0.015, 1.02], [0, 0, 0, -0.01, 0.02, -0.015, -0.1]])
         if representation == "absolute":

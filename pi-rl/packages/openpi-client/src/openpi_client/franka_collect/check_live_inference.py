@@ -21,34 +21,17 @@ from openpi_client.franka_collect.live_observation import LiveObservationReader
 
 
 def check_supervisor_paths(command, directory, node, namespace, faults):
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-
     from rcl_interfaces.msg import Log
     from rclpy.qos import QoSProfile
 
     from openpi_client.franka_collect.action_test import ScriptedActionPolicy, run_client_session
 
-    stopped = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            self.rfile.read(int(self.headers["Content-Length"]))
-            stopped.append(self.path)
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b'{"name":"robot","running":false}')
-
-        def log_message(self, *_):
-            pass
-
-    http = HTTPServer(("127.0.0.1", 0), Handler)
-    worker = threading.Thread(target=http.serve_forever, daemon=True)
-    worker.start()
     topic = f"/{namespace}/supervisor_fault"
-    faults["supervisor_log_publisher"] = node.create_publisher(Log, topic, QoSProfile(depth=100))
+    faults["supervisor_log_publisher"] = node.create_publisher(
+        Log, topic, QoSProfile(depth=100)
+    )
     try:
         for case in ("normal", "hardware_error", "interrupt"):
-            stopped.clear()
             faults["supervisor_error"] = case == "hardware_error"
             policy = ScriptedActionPolicy(execute=True)
             output = directory / "results" / f"supervisor_{case}"
@@ -60,8 +43,6 @@ def check_supervisor_paths(command, directory, node, namespace, faults):
                     sys.executable,
                     "-m",
                     "openpi_client.franka_collect.test_supervisor",
-                    "--stop-url",
-                    f"http://127.0.0.1:{http.server_port}/robot/stop",
                     "--rosout-topic",
                     topic,
                     "--",
@@ -84,7 +65,6 @@ def check_supervisor_paths(command, directory, node, namespace, faults):
 
             if case == "normal":
                 run_client_session(policy, arguments, output, "127.0.0.1", 0)
-                assert not stopped
                 result = policy.assessment(json.loads(client_report.read_text()))
                 assert result["status"] == "passed", result
             else:
@@ -98,13 +78,9 @@ def check_supervisor_paths(command, directory, node, namespace, faults):
                 expected = (
                     "Hardware error:" if case == "hardware_error" else "Interrupted by signal 2"
                 )
-                assert expected in log and "SUPERVISOR: robot driver stopped" in log, log
-                assert stopped == ["/robot/stop"], stopped
+                assert expected in log and "SUPERVISOR: stopping inference client:" in log, log
             print(f"PASS: isolated supervisor {case}", flush=True)
     finally:
-        http.shutdown()
-        worker.join(timeout=2)
-        http.server_close()
         node.destroy_publisher(faults.pop("supervisor_log_publisher"))
 
 

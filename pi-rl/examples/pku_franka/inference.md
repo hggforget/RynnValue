@@ -9,8 +9,8 @@ pi-rl 内置的 Pi0.5 推理流程，直接使用本项目的模型加载和原�
 | `replay` | LeRobot 录制数据或 NPZ 快照 | 回放观测并请求模型 |
 | `inference` | 实时 ROS 位姿、关节、夹爪和双相机 | 读取新观测并请求模型 |
 
-两个模式默认只返回、保存模型输出。`inference` 可用 `EXECUTE=1` 启用机械臂和夹爪动作执行，
-`replay` 始终只回放录制观测。
+`run_franka.sh` 的 `inference` 默认执行机械臂和夹爪动作，用于真机任务成功率测试。
+`EXECUTE=0` 可只返回、保存预测，`DRY_RUN=1` 可仅规划目标；`replay` 始终只回放录制观测。
 
 ## Franka 端直接启动
 
@@ -21,7 +21,13 @@ cd /home/hdc/workspace/RynnValue/pi-rl
 bash examples/pku_franka/run_franka.sh
 ```
 
-默认读取实时 ROS 观测，使用绝对动作模型，请求 100 次；需要机器人和双相机驱动已启动。
+默认读取实时 ROS 观测，使用绝对动作模型，评测 10 次尝试，每次执行前 10 步、30 Hz，
+机械臂和夹爪均启用。需要机器人和双相机驱动已启动，并关闭遥操采集器。
+每次尝试最多 300 秒（5 分钟），超时自动记为失败；完成设定次数并复位，或手动退出后结束。
+Ctrl+C、硬件错误或客户端失败只终止本次推理客户端。
+退出时保持最新实测位姿并取消未完成的夹爪动作，监控程序不调用 robot 驱动停止接口。
+从 4090 的 `tmux test` 可直接运行
+`ssh -tt pku-franka-hdc 'cd /home/hdc/workspace/RynnValue/pi-rl && bash examples/pku_franka/run_franka.sh'`。
 常用参数集中在 `run_franka.sh` 顶部，可以直接编辑。回放录制观测和切换模型只需：
 
 ```bash
@@ -38,6 +44,68 @@ ACTION_REPRESENTATION=relative bash examples/pku_franka/run_franka.sh replay
 `run_inference.sh` 保留为可传入完整客户端参数的入口。
 `run_franka.sh` 仅接受可选的模式名，其余配置使用脚本顶部设置或环境变量，避免额外 CLI 参数
 覆盖已打印的执行开关。
+
+### 成功、失败与重试
+
+实时执行默认进入评测，按键无需回车：
+
+- 每一轮（包括第一轮）先等待按空格，再开始推理和本轮计时。
+- `s`：判定本次成功，保持当前位姿并保存结果。
+- `f`：判定本次失败，保持当前位姿并保存结果。
+- 判定或超时后，等待你按 `r`：打开夹爪，回到采集固定起点，然后等待空格开始下一轮。
+- 运行中 `p` / 空格：暂停本次尝试；`c` 继续。暂停时间计入本次 5 分钟。
+- `q`：退出客户端并保存已产生的结果，保留 robot 驱动。
+
+等待开始、等待 `r` 以及复位过程均不计时。等待空格时不请求模型、不执行动作。
+最后一次判定后也等待 `r`，完成复位后结束评测。提前按下或缓存的 `r` 和空格不会
+触发后续复位或开始，需在对应提示出现后重新按下。
+复位未到位或失败时仍停留在复位阶段，可按 `r` 重试，不会进入下一轮。
+复位期间可用 `Ctrl+C` 中止。
+
+尝试次数可编辑脚本顶部的 `ATTEMPTS`，或通过环境变量设置：
+
+```bash
+ATTEMPTS=5 bash examples/pku_franka/run_franka.sh inference
+```
+
+`ATTEMPT_TIMEOUT` 默认 300 秒。每次判定立即写入本次运行目录下的 `report.json`，
+包括 `result`（`success` / `failure`）、`reason`（手动、超时或错误）、用时、模型请求次数
+以及复位状态；`summary` 汇总完成次数、成功数、失败数和成功率。
+超时或被取消的模型请求也计入请求次数。中断正在执行的尝试会记为失败，原因 `interrupted`；
+在等待复位时退出会保留已有判定。已确认的判定不会因后续清理错误而被改写。
+
+### 普通推理的暂停、复位与继续
+
+`ATTEMPTS=0` 使用原有普通推理模式，由 `REPEAT` 控制请求次数，不进行逐次成功率评测。
+
+在终端运行实时动作执行时，按 `p` 或空格暂停。客户端保持最新实测位姿，
+取消未完成的夹爪动作，丢弃当前动作块尚未执行的部分。暂停菜单接受：
+
+- `r`：打开夹爪，回到采集固定起点，完成后保持暂停。
+- `c`：继续，重新读取观测并请求新的模型动作。
+- `q`：退出本次推理客户端，保留 robot 驱动。
+
+普通推理没有总运行时限，暂停期间硬件错误监控继续工作。
+键盘操作需要交互终端；通过 SSH 使用时加 `-tt`。后台运行和非终端输入沿用原有执行方式。
+`Ctrl+C` 仍可退出客户端。
+复位进行中可用 `Ctrl+C` 中止；`q` 在暂停菜单中处理。
+使用 `--disable-gripper` 的客户端会拒绝执行需要打开夹爪的复位，并保持暂停。
+
+也可以单独复位：
+
+```bash
+bash examples/pku_franka/run_franka.sh reset
+# 只预览复位目标，不发送控制命令
+DRY_RUN=1 bash examples/pku_franka/run_franka.sh reset
+```
+
+复位目标为机器人基座坐标系 XYZ `[0.3550, 0.0277, 0.2356]` 米，Euler XYZ
+`[-pi, 0, 0]` 弧度，与采集页面固定起点一致。复位使用本地 ROS 机械臂状态，
+无需模型服务器或相机；需先退出其他动作控制客户端。
+按 10 Hz 发布目标，每步平移最多 3 mm、旋转最多 0.02 rad，
+实测位置误差不超过 20 mm、姿态误差不超过 2 度时判定复位完成。
+默认 30 秒超时，可用 `RESET_TIMEOUT` 覆盖。
+结果和日志保存在独立的 `*_reset_*` 目录。退出时保持实测位姿，保留 robot 驱动。
 
 ## 启动模型服务
 
@@ -136,8 +204,9 @@ bash examples/pku_franka/run_inference.sh --mode inference \
 ```
 
 实时读取器根据现有 `crisp_gym` 的 `fr3_dual_cam_640x480` 配置解析 ROS topics，
-每次请求等待新的观测，最大观测年龄为 0.25 秒，
-各源时间戳差最大为 0.1 秒。缺少驱动或数据过期时会超时退出，
+每次请求等待各路观测更新；机械臂状态最大年龄为 0.25 秒，状态间时间戳差最大为 0.1 秒。
+双相机只要求收到图像更新，不检查图像延迟、时间戳年龄或相机与状态的同步差。
+缺少驱动、图像输入或机械臂状态过期时会超时退出，
 可用 `--observation-timeout` 调整等待时间。
 
 ### 从 4090 测试真机动作执行
@@ -165,10 +234,9 @@ bash examples/pku_franka/test_robot_execution.sh --execute
 `--disable-gripper` 禁止发送任何夹爪命令。
 它检查真实反馈：上移、返回的末端误差均需小于 1.5 mm，实测上移量至少达到目标的 60%，
 姿态和夹爪状态无明显变化，才能报告 `passed`。仅发送成功但机械臂不动会报告失败。
-执行前默认倒计时 5 秒；远端设置独立监控，出现硬件 ERROR、客户端失败或超时时停止整个
-robot 驱动。4090 终端按 Ctrl+C 也会请求停止 robot 驱动，停止结果会打印出来。
-正常完成仍沿用执行器的保持逻辑。测试不执行自动故障恢复。
-失败/中断后重跑前，先在 `data_collection_web` 启动 robot 服务；仅重跑测试不会自动启动驱动。
+执行前默认倒计时 5 秒；远端设置独立监控，出现硬件 ERROR、客户端失败、超时或 Ctrl+C 时
+终止本次测试客户端，保留 robot 驱动。退出沿用执行器的保持逻辑。测试不执行自动故障恢复。
+若 robot 服务本身未运行，需先在 `data_collection_web` 启动；测试不会自动启动驱动。
 脚本现在在倒计时前检查服务，驱动未启动会直接提示 `Robot driver is stopped` 并退出。
 原始客户端的 TimeoutError 等错误也会显示到测试终端，完整堆栈保存在 `client.log`。
 
@@ -196,8 +264,9 @@ bash examples/pku_franka/test_robot_execution.sh --execute --action-representati
 
 ### 执行模型预测动作
 
-`run_franka.sh` 启动时会打印 `Execute: 0/1`。默认值为 0，机器人不会因模型预测而运动。
-先用真机观测规划 3 个目标，不发送任何控制命令：
+`run_franka.sh` 启动时会打印 `Execute: 0/1`。实时模式默认值为 1，直接执行机械臂和夹爪动作。
+只做预测时使用 `EXECUTE=0 bash examples/pku_franka/run_franka.sh`。
+用真机观测规划 3 个目标，不发送控制命令：
 
 ```bash
 DRY_RUN=1 REPEAT=1 EXECUTE_STEPS=3 bash examples/pku_franka/run_franka.sh
@@ -206,13 +275,15 @@ DRY_RUN=1 REPEAT=1 EXECUTE_STEPS=3 bash examples/pku_franka/run_franka.sh
 在机器人旁启用执行，先只运行一轮、3 步：
 
 ```bash
-EXECUTE=1 REPEAT=1 EXECUTE_STEPS=3 bash examples/pku_franka/run_franka.sh
+REPEAT=1 EXECUTE_STEPS=3 bash examples/pku_franka/run_franka.sh
 ```
 
-持续闭环执行使用 `EXECUTE=1 bash examples/pku_franka/run_franka.sh`。
+任务成功率测试直接使用 `bash examples/pku_franka/run_franka.sh`。
 默认每轮执行预测块的前 10 步，按 30 Hz 发布，再读取新观测请求模型；
 用 `EXECUTE_STEPS`、`CONTROL_HZ` 修改这两个参数。
 完整客户端参数对应 `--execute` / `--dry-run-execution`、`--execute-steps`、`--control-hz`。
+100 是推理请求数，一次启动是一轮任务试验。每轮恢复相同初始场景，人工记录任务成功/失败，
+以成功任务数除以总任务数统计成功率；当前没有自动任务成功判定。
 
 执行器使用现有 CRISP 接口：启动执行时激活 `cartesian_impedance_controller`，
 向 `/left/target_pose` 发布基座坐标系的 `PoseStamped`，夹爪通过
@@ -222,12 +293,16 @@ EXECUTE=1 REPEAT=1 EXECUTE_STEPS=3 bash examples/pku_franka/run_franka.sh
 夹爪同一时刻只保留一个未完成请求，检查最终执行结果；请求拒绝、执行中止、超过 2 秒未确认或
 超过 10 秒未完成时，停止后续动作。每个动作块执行前重新确认 Cartesian 控制器处于 active 状态。
 
-每步目标平移最多 5 mm、转动最多 0.03 rad；超出配置工作空间、远距离目标、观测过期、
-实际跟踪误差过大或存在其他命令发布者时会拒绝继续。
+每步目标平移最多 5 mm、转动最多 0.03 rad；超出配置工作空间、观测过期、
+或存在其他命令发布者时会拒绝继续。
+模型绝对目标通过 `target - last_target` 计算插值步长，不累加绝对坐标。
+已移除额外的 10 cm 目标距离与 0.75 rad 目标角度硬拒绝规则，远目标沿同样的每步限幅逐渐接近。
+同时移除了额外的 3 cm / 0.25 rad 跟踪误差中断；机械臂的阻抗跟踪偏差不会单独触发软件停机。
 工作空间读取采集端真正生效的 `config.safety_box`；报告的 `workspace_lower/upper` 中，
 `null` 代表该方向未设置界限。现有采集数据包含合法负 Z，不能额外把基座 Z=0 当作桌面边界。
 相对动作基于上一步实际发布的目标累积，限幅舍弃的增量不会在后续零动作中继续追赶。
-退出或 `Ctrl+C` 时保持最新实测位姿，并取消尚未完成的夹爪目标。执行器不自动回 home。
+执行器退出时保持最新实测位姿，并取消尚未完成的夹爪目标。`run_franka.sh` 的执行监控在
+Ctrl+C、硬件错误、客户端失败或超时时终止本次推理客户端，保留 robot 驱动。执行器不自动回 home。
 `EXECUTE=1` 与 `DRY_RUN=1` 互斥，均不能用于 `replay`。
 
 | 字段 | 约定 |
