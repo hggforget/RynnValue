@@ -69,6 +69,17 @@ class CollectRLTest(unittest.TestCase):
         self.assertAlmostEqual(float(transform(_transition(7))["chunk_reward"]), -0.1 - 0.9, places=6)
         self.assertEqual(transform(_transition())["mask"], 1)
 
+    def test_negative_remaining_time_progress_keeps_its_scale_and_direction(self):
+        item = _transition()
+        item["progress"] = np.array([-40.0, -37.0, -33.0, -30.0], dtype=np.float32)
+        transform = rl.PkuFrankaCollectRLInputs({0: 10}, failed_episode_ids=(0,), discount=0.9)
+        self.assertAlmostEqual(float(transform(item)["chunk_reward"]), 40.0 - 0.9**3 * 30.0, places=5)
+        item["frame_index"] = np.int64(9)
+        item["progress"][:] = -20.0
+        terminal = transform(item)
+        self.assertEqual(terminal["mask"], 0.0)
+        self.assertAlmostEqual(float(terminal["chunk_reward"]), 19.0, places=6)
+
     def test_progress_is_required_and_finite(self):
         item = _transition()
         item["progress"][0] = np.nan
@@ -115,8 +126,8 @@ class CollectRLTest(unittest.TestCase):
 
     @unittest.skipUnless(importlib.util.find_spec("pyarrow"), "PyArrow is available on the dataset host")
     def test_filter_maps_global_indices_and_excludes_failed_episodes(self):
-        import pyarrow as pa  # noqa: PLC0415
-        import pyarrow.parquet as pq  # noqa: PLC0415
+        import pyarrow as pa
+        import pyarrow.parquet as pq
 
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

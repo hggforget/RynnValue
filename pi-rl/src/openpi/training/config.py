@@ -2294,7 +2294,8 @@ _CONFIGS = [
         data=LeRobotPkuFrankaCollectDataConfig(
             repo_id="/home/hdc/workspace/DATA/local/fr3_collect_objects_20261017",
             assets=AssetsConfig(asset_id="pku_franka_collect_objects"),
-            base_config=DataConfig(prompt_from_task=True),
+            default_prompt=pku_franka_collect_policy.EXPERT_COLLECT_OBJECTS_PROMPT,
+            base_config=DataConfig(prompt_from_task=False),
             excluded_episode_ids=(0, 2, 14, 21, 47, 52),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
@@ -2318,11 +2319,14 @@ _CONFIGS = [
         name="pi05_pku_franka_collect_objects_iql",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
         data=LeRobotPkuFrankaCollectRLDataConfig(
-            repo_id="/home/hdc/workspace/DATA/local/fr3_collect_objects_20261017",
+            repo_id="/oss/embodied-ai-data/pku/fr3_collect_objects_20261017_progress_expert_sup_step005000",
             assets=AssetsConfig(asset_id="pku_franka_collect_objects"),
-            base_config=DataConfig(prompt_from_task=True),
+            # Match the expert labels' task definition, including the wood-grain exception.
+            default_prompt=pku_franka_collect_policy.EXPERT_COLLECT_OBJECTS_PROMPT,
+            base_config=DataConfig(prompt_from_task=False),
+            failed_episode_ids=(0, 2, 14, 21, 47, 52, 78, 83),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
         checkpoint_base_dir="./checkpoints",
         batch_size=16,
         num_workers=4,

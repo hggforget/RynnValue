@@ -5,8 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
-# The environment may have an editable openpi install from another checkout; prefer this repo.
-export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+# Prefer this checkout's OpenPI and vendored IQL learner over editable installs elsewhere.
+export PYTHONPATH="$PROJECT_ROOT/src:$PROJECT_ROOT/third_party/jaxrl2${PYTHONPATH:+:$PYTHONPATH}"
 
 DEFAULT_PYTHON=/opt/conda/envs/pku-pi-rl/bin/python
 [[ -x "$DEFAULT_PYTHON" ]] || DEFAULT_PYTHON=python3
@@ -25,8 +25,12 @@ case "$METHOD" in
     *) echo "METHOD must be sft, iql, or filter_bc" >&2; exit 1 ;;
 esac
 CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
-REPO_ID="${REPO_ID:-/oss/embodied-ai-data/pku/fr3_collect_objects_20261017}"
-EXP_NAME="${EXP_NAME:-fr3_collect_objects_20261017_$(date +%m%d_%H%M%S)}"
+DEFAULT_REPO_ID=/oss/embodied-ai-data/pku/fr3_collect_objects_20261017
+if [[ "$METHOD" == "iql" ]]; then
+    DEFAULT_REPO_ID+=_progress_expert_sup_step005000
+fi
+REPO_ID="${REPO_ID:-$DEFAULT_REPO_ID}"
+EXP_NAME="${EXP_NAME:-$(basename "$REPO_ID")_$(date +%m%d_%H%M%S)}"
 if [[ -z "${GPUS:-}" ]]; then
     GPUS=0
     if command -v nvidia-smi >/dev/null 2>&1; then

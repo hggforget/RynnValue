@@ -1,9 +1,11 @@
 # FR3 collect-objects 数据集训练
 
-数据位置：`pku-franka-hdc:/home/hdc/workspace/DATA/local/fr3_collect_objects_20261017`。
-2026-10-19 检查到 LeRobot v2.1、64 条轨迹、46,590 帧、主相机和腕相机各 64 个视频。
-全部 Parquet 时间戳与 128 个视频流均为 30 Hz；`video_info.video.fps` 中残留的 5 Hz
-字段不作为训练时间轴。配置不修改原始数据和元数据。
+IQL 默认数据集：`/oss/embodied-ai-data/pku/fr3_collect_objects_20261017_progress_expert_sup_step005000`。
+2026-10-25 已核验 LeRobot v2.1、106 条轨迹、87,988 帧、主相机和腕相机各 106 个视频，
+逐帧包含 expert head（step005000）预测的 `remaining_time_s` 与 `progress = -remaining_time_s`。
+SFT / Filter BC 启动脚本默认使用 `/oss/embodied-ai-data/pku/fr3_collect_objects_20261017`。
+实际数据时间轴为 30 Hz；`video_info.video.fps` 中残留的 5 Hz 字段不作为训练时间轴。
+配置不修改数据和元数据。
 
 | 微调方式 | 绝对动作配置 | 相对动作配置 | 学习率 |
 | --- | --- | --- | --- |
@@ -14,7 +16,7 @@
 以上六个离线配置均为 Batch 16、Horizon 30（1 秒）、20,000 步；从 `pi05_base` 初始化，
 warmup 1,000 步，每 1,000 步保存 checkpoint。原配置名继续表示绝对动作，`_relative` 系列读取已录制的相对动作。
 π0.5 保持内部 32 维以加载预训练权重，状态和动作分别补齐后输入模型。
-20,000 步是起始训练预算，按 42,465 个保留帧和 Batch 16 约相当于 7.5 遍数据；
+20,000 步是起始训练预算，IQL 按 87,988 帧和 Batch 16 约相当于 3.6 遍数据；
 应结合独立保留轨迹和实际任务表现选择 checkpoint。当前配置沿用数据集的 train split，未建立验证集。
 
 ## 数据契约
@@ -40,14 +42,21 @@ warmup 1,000 步，每 1,000 步保存 checkpoint。原配置名继续表示绝�
 选中的动作字段缺失、元数据中的动作表示不匹配或标签包含 NaN/Inf 会报错，不会退回另一个字段。
 两种动作版本的归一化统计和 checkpoint 不可混用；旧 `pi05_pku_franka` 的夹爪 `-1/+1` 约定也不同。
 
-数据的两个 task 实际是同一任务，其中一个漏了首字母。适配器将
+数据的两个 task 实际是同一任务，其中一个漏了首字母。适配器兼容将
 `lace each object on the plate that matches its color.` 统一为
 `place each object on the plate that matches its color.`，推理时仍可传入其他指令。
 
-SFT / Filter BC 默认排除 `episodes.jsonl` 备注中明确写有失败的轨迹 `0, 2, 14, 21, 47, 52`，
-剩余 **58 条、42,465 帧**。IQL 保留全部 64 条，包括失败轨迹。备注为“最后有点瑕疵”和“resume 上条，红色没看见”的
-轨迹 18、22 暂保留，未自行推断其成败。白名单从当前元数据读取，后续新增轨迹不会因为
-硬编码总数而被遗漏。要使用全部轨迹，可在这两个预设中将 `excluded_episode_ids` 改成 `()`。
+SFT / IQL 的绝对、相对动作配置都使用与 expert 标注一致的新指令，并在 tokenization 前注入：
+
+```text
+Place each solid-colored block on the plate that matches its color. Leave all wooden-textured blocks on the table.
+```
+
+IQL 保留全部 **106 条、87,988 帧**，对明确备注为最终失败的
+`0, 2, 14, 21, 47, 52, 78, 83` 额外施加终止惩罚。
+轨迹 71 的备注是“有抓取失败重复抓取动作”，属于中途重试，不据此标为整条失败。
+SFT / Filter BC 保留现有的六条排除项 `0, 2, 14, 21, 47, 52`；
+白名单从当前元数据读取，后续新增轨迹不会因为硬编码总数而被遗漏。
 
 ## 启动
 
@@ -56,20 +65,29 @@ SFT / Filter BC 默认排除 `episodes.jsonl` 备注中明确写有失败的轨�
 NumPy / PyArrow / PyAV / LeRobot，但没有 JAX / Flax，且其 LeRobot 不提供本仓库使用的
 `lerobot.common` 命名空间，因此不是兼容的 OpenPI 训练环境；不要混用两套环境的包。
 
-从 `pi-rl` 项目目录启动，默认全参数 SFT、单 GPU：
+从 `pi-rl` 项目目录启动，默认全参数 SFT，并自动选择检测到的 GPU。
+IQL 的默认数据路径已经指向上述 expert 数据集，单卡可这样启动：
 
 ```bash
 bash scripts/train_pi05_pku_franka_collect_objects.sh
 
-METHOD=iql bash scripts/train_pi05_pku_franka_collect_objects.sh
+METHOD=iql GPUS=0 INIT_CHECKPOINT= bash scripts/train_pi05_pku_franka_collect_objects.sh
 METHOD=filter_bc bash scripts/train_pi05_pku_franka_collect_objects.sh
+```
+
+让 SFT 也读取同一份 expert 数据集：
+
+```bash
+METHOD=sft GPUS=0 \
+REPO_ID=/oss/embodied-ai-data/pku/fr3_collect_objects_20261017_progress_expert_sup_step005000 \
+  bash scripts/train_pi05_pku_franka_collect_objects.sh
 ```
 
 相对动作版本，通过 `ACTION_REPRESENTATION=relative` 切换：
 
 ```bash
 ACTION_REPRESENTATION=relative bash scripts/train_pi05_pku_franka_collect_objects.sh
-ACTION_REPRESENTATION=relative METHOD=iql bash scripts/train_pi05_pku_franka_collect_objects.sh
+ACTION_REPRESENTATION=relative METHOD=iql GPUS=0 INIT_CHECKPOINT= bash scripts/train_pi05_pku_franka_collect_objects.sh
 ACTION_REPRESENTATION=relative METHOD=filter_bc bash scripts/train_pi05_pku_franka_collect_objects.sh
 ```
 
@@ -94,14 +112,14 @@ PYTHON=/已安装训练依赖的环境/bin/python \
 `assets/<配置名>/<asset_id>/norm_stats.json`。绝对版本的 asset_id 为 `pku_franka_collect_objects`，
 相对版本为 `pku_franka_collect_objects_relative`。统计只使用上述 14 维实测状态和所选字段的 7 维动作。
 每个配置独立计算统计，避免动作表示或不同筛选集合覆盖彼此；确认统计正确且白名单未变后，可用 `SKIP_NORM=1` 跳过。
-checkpoint 位于 `./checkpoints/<配置名>/<EXP_NAME>/`，默认实验名为
-`fr3_collect_objects_20261017`。续训增加 `--resume`；新实验通过 `EXP_NAME` 更名。
+checkpoint 位于 `./checkpoints/<配置名>/<EXP_NAME>/`，默认实验名为数据目录名加时间戳。
+续训时设置原 `EXP_NAME` 并增加 `--resume`；新实验通过 `EXP_NAME` 更名。
 
 ## IQL 与 Filter BC 的 progress 接口
 
-按“后续存在逐帧 progress 字段”的要求实现；原始数据当前仍没有此字段，没有写入虚构标注。
-需要在 `meta/info.json` 中声明标量 float32 `progress`，并在每个 Parquet 中保存逐帧同名数值列。
-约定越大越接近完成；如果标注是剩余时间/代价，应先转换为同方向的势能，例如取负值。
+新 expert 数据集已在 `meta/info.json` 中声明标量 float32 `progress`，每个 Parquet
+均保存逐帧同名数值列。其值为负的预测剩余秒数，越大越接近完成；训练直接使用该势能，
+保留秒数尺度和模型回退，不强制裁剪至 `[0, 1]`。
 缺少字段或出现 NaN/Inf 会报错。合成 progress 仅用于接口测试。
 
 IQL 请求两路 RGB、Cartesian、gripper、joints 在 `[t,t+H]` 的观测对，以及 `progress[t:t+H+1]`。
@@ -115,13 +133,14 @@ Filter BC 对保留轨迹计算 `A_t = sum(k<W) lambda^k * (progress[t+k+1]-prog
 默认 `W=50`、`lambda=0.98`，保留 `A_t>0` 的全局帧索引，随后执行全参数普通 BC。
 也支持 mean / median / quantile 阈值，不把筛选分数作为策略输入；每次重新计算索引，避免标签更新后误用旧缓存。
 
-IQL 可从同一动作版本的 SFT checkpoint 初始化：
+本任务的 IQL 独立从第 0 步开始：策略加载 `pi05_base` 预训练权重，critic/value 随机初始化。
+使用新的实验名、清空 `INIT_CHECKPOINT`，且不传 `--resume`：
 
 ```bash
-METHOD=iql INIT_CHECKPOINT=/训练输出/SFT实验/20000 \
+METHOD=iql GPUS=0 EXP_NAME=fr3_expert_iql_from_base INIT_CHECKPOINT= \
   bash scripts/train_pi05_pku_franka_collect_objects.sh
 
-ACTION_REPRESENTATION=relative METHOD=iql INIT_CHECKPOINT=/训练输出/相对动作SFT实验/20000 \
+ACTION_REPRESENTATION=relative METHOD=iql GPUS=0 EXP_NAME=fr3_expert_relative_iql_from_base INIT_CHECKPOINT= \
   bash scripts/train_pi05_pku_franka_collect_objects.sh
 ```
 
@@ -175,7 +194,7 @@ observation = {
     "observation.state.cartesian": measured_xyz_rpy,  # (6,), m/rad
     "observation.state.gripper": measured_gripper_0_to_1,  # scalar or (1,)
     "observation.state.joints": measured_joint_angles,  # (7,), rad
-    "prompt": "place each object on the plate that matches its color.",
+    "prompt": "Place each solid-colored block on the plate that matches its color. Leave all wooden-textured blocks on the table.",
 }
 actions = policy.infer(observation)["actions"]  # (30, 7)，含义由加载的动作版本决定
 ```
@@ -191,6 +210,16 @@ actions = policy.infer(observation)["actions"]  # (30, 7)，含义由加载的�
 轻量客户端位于 `packages/openpi-client/src/openpi_client/franka_collect/`。
 
 ## 已完成的验证
+
+- 2026-10-25：新 expert 数据集的绝对/相对 SFT、IQL 配置通过真实 DataLoader 和 tokenizer 检查；
+  解码后的策略 token 包含完整新指令及 `Action:`，保留全部 106 条轨迹。
+  适配器、RL 奖励、启动脚本及真实数据集检查共 31 项通过；
+  另外用 16 个样本验证两种动作表示的归一化入口，并完成一次真实 ResNet-18 双相机
+  IQL critic/value 更新和优势计算，参数发生更新且指标有限。
+  此次未生成生产归一化资产或启动完整策略训练；正式启动脚本会计算全量统计。
+  启动脚本会优先加载本仓库的 `third_party/jaxrl2`，无需另装该 vendored learner。
+
+下面为早期 64 条轨迹版本的验证记录：
 
 - 10 项 NumPy/标准库适配器测试通过，覆盖绝对/相对动作字段选择、夹爪保持、缺少字段时拒绝回退、
   目标字段泄漏、两路图像、指令拼写、推理输入、字段形状，以及失败轨迹筛选和后续新增轨迹。

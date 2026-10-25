@@ -13,6 +13,10 @@ from typing import Literal
 import numpy as np
 
 COLLECT_OBJECTS_PROMPT = "place each object on the plate that matches its color."
+EXPERT_COLLECT_OBJECTS_PROMPT = (
+    "Place each solid-colored block on the plate that matches its color. "
+    "Leave all wooden-textured blocks on the table."
+)
 _MISSPELLED_PROMPT = "lace each object on the plate that matches its color."
 ACTION_DIM = 7
 STATE_DIM = 14
