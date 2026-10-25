@@ -3,7 +3,7 @@
 IQL 默认数据集：`/oss/embodied-ai-data/pku/fr3_collect_objects_20261017_progress_expert_sup_step005000`。
 2026-10-25 已核验 LeRobot v2.1、106 条轨迹、87,988 帧、主相机和腕相机各 106 个视频，
 逐帧包含 expert head（step005000）预测的 `remaining_time_s` 与 `progress = -remaining_time_s`。
-SFT / Filter BC 启动脚本默认使用 `/oss/embodied-ai-data/pku/fr3_collect_objects_20261017`。
+SFT / IQL 独立启动脚本都默认使用上述 expert 数据集；Filter BC 保持原数据路径。
 实际数据时间轴为 30 Hz；`video_info.video.fps` 中残留的 5 Hz 字段不作为训练时间轴。
 配置不修改数据和元数据。
 
@@ -65,30 +65,27 @@ SFT / Filter BC 保留现有的六条排除项 `0, 2, 14, 21, 47, 52`；
 NumPy / PyArrow / PyAV / LeRobot，但没有 JAX / Flax，且其 LeRobot 不提供本仓库使用的
 `lerobot.common` 命名空间，因此不是兼容的 OpenPI 训练环境；不要混用两套环境的包。
 
-从 `pi-rl` 项目目录启动，默认全参数 SFT，并自动选择检测到的 GPU。
-IQL 的默认数据路径已经指向上述 expert 数据集，单卡可这样启动：
+从 `pi-rl` 项目目录使用两个独立入口启动。两者都采用新 expert 数据集和完整新指令，
+自动计算归一化统计；单卡命令如下，省略 `GPUS` 会选择检测到的所有 GPU。
 
 ```bash
-bash scripts/train_pi05_pku_franka_collect_objects.sh
-
-METHOD=iql GPUS=0 INIT_CHECKPOINT= bash scripts/train_pi05_pku_franka_collect_objects.sh
-METHOD=filter_bc bash scripts/train_pi05_pku_franka_collect_objects.sh
+GPUS=0 bash scripts/train_sft_pku_franka_collect_objects.sh
+GPUS=0 bash scripts/train_iql_pku_franka_collect_objects.sh
 ```
 
-让 SFT 也读取同一份 expert 数据集：
+IQL 独立加载 `pi05_base`，critic/value 随机初始化，默认从第 0 步开始。
+入口会清空继承的 `INIT_CHECKPOINT`，避免误接 SFT checkpoint。
+原来的通用入口仍可用于 Filter BC：
 
 ```bash
-METHOD=sft GPUS=0 \
-REPO_ID=/oss/embodied-ai-data/pku/fr3_collect_objects_20261017_progress_expert_sup_step005000 \
-  bash scripts/train_pi05_pku_franka_collect_objects.sh
+METHOD=filter_bc bash scripts/train_pi05_pku_franka_collect_objects.sh
 ```
 
 相对动作版本，通过 `ACTION_REPRESENTATION=relative` 切换：
 
 ```bash
-ACTION_REPRESENTATION=relative bash scripts/train_pi05_pku_franka_collect_objects.sh
-ACTION_REPRESENTATION=relative METHOD=iql GPUS=0 INIT_CHECKPOINT= bash scripts/train_pi05_pku_franka_collect_objects.sh
-ACTION_REPRESENTATION=relative METHOD=filter_bc bash scripts/train_pi05_pku_franka_collect_objects.sh
+ACTION_REPRESENTATION=relative GPUS=0 bash scripts/train_sft_pku_franka_collect_objects.sh
+ACTION_REPRESENTATION=relative GPUS=0 bash scripts/train_iql_pku_franka_collect_objects.sh
 ```
 
 默认 `ACTION_REPRESENTATION=absolute`。若同时显式指定 CONFIG 和 ACTION_REPRESENTATION，二者必须一致。
@@ -96,16 +93,16 @@ ACTION_REPRESENTATION=relative METHOD=filter_bc bash scripts/train_pi05_pku_fran
 根据显存调整 Batch / FSDP：
 
 ```bash
-CONFIG=pi05_pku_franka_collect_objects GPUS=0,1 FSDP_DEVICES=2 \
-  bash scripts/train_pi05_pku_franka_collect_objects.sh --batch-size 16
+GPUS=0,1 FSDP_DEVICES=2 \
+  bash scripts/train_sft_pku_franka_collect_objects.sh --batch-size 16
 ```
 
 数据在另一台训练机器上的不同目录时：
 
 ```bash
-REPO_ID=/本机数据路径/fr3_collect_objects_20261017 \
+REPO_ID=/本机数据路径/fr3_collect_objects_20261017_progress_expert_sup_step005000 \
 PYTHON=/已安装训练依赖的环境/bin/python \
-  bash scripts/train_pi05_pku_franka_collect_objects.sh
+  bash scripts/train_sft_pku_franka_collect_objects.sh
 ```
 
 脚本先用 CPU 扫描各方法实际使用的轨迹/帧，跳过视频解码，重新计算归一化统计，写入
@@ -134,14 +131,14 @@ Filter BC 对保留轨迹计算 `A_t = sum(k<W) lambda^k * (progress[t+k+1]-prog
 也支持 mean / median / quantile 阈值，不把筛选分数作为策略输入；每次重新计算索引，避免标签更新后误用旧缓存。
 
 本任务的 IQL 独立从第 0 步开始：策略加载 `pi05_base` 预训练权重，critic/value 随机初始化。
-使用新的实验名、清空 `INIT_CHECKPOINT`，且不传 `--resume`：
+使用新的实验名且不传 `--resume`：
 
 ```bash
-METHOD=iql GPUS=0 EXP_NAME=fr3_expert_iql_from_base INIT_CHECKPOINT= \
-  bash scripts/train_pi05_pku_franka_collect_objects.sh
+GPUS=0 EXP_NAME=fr3_expert_iql_from_base \
+  bash scripts/train_iql_pku_franka_collect_objects.sh
 
-ACTION_REPRESENTATION=relative METHOD=iql GPUS=0 EXP_NAME=fr3_expert_relative_iql_from_base INIT_CHECKPOINT= \
-  bash scripts/train_pi05_pku_franka_collect_objects.sh
+ACTION_REPRESENTATION=relative GPUS=0 EXP_NAME=fr3_expert_relative_iql_from_base \
+  bash scripts/train_iql_pku_franka_collect_objects.sh
 ```
 
 ## DSRL 在线训练

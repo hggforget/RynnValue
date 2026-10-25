@@ -21,6 +21,8 @@ class CollectLaunchTest(unittest.TestCase):
         source = pathlib.Path(__file__).resolve().parents[3] / "scripts/train_pi05_pku_franka_collect_objects.sh"
         self.script = scripts / source.name
         shutil.copyfile(source, self.script)
+        for name in ("train_sft_pku_franka_collect_objects.sh", "train_iql_pku_franka_collect_objects.sh"):
+            shutil.copyfile(source.parent / name, scripts / name)
         self.dataset = self.root / "dataset"
         (self.dataset / "meta").mkdir(parents=True)
         (self.dataset / "meta/info.json").write_text("{}")
@@ -49,7 +51,7 @@ class CollectLaunchTest(unittest.TestCase):
         )
         self.python.chmod(0o755)
 
-    def launch(self, *, method="sft", representation=None, config=None, skip_norm=False):
+    def launch(self, *, method="sft", representation=None, config=None, skip_norm=False, script_name=None, extra_env=None):
         env = dict(os.environ)
         for key in ["METHOD", "CONFIG", "ACTION_REPRESENTATION", "SKIP_NORM", "INIT_CHECKPOINT"]:
             env.pop(key, None)
@@ -60,9 +62,31 @@ class CollectLaunchTest(unittest.TestCase):
             env["CONFIG"] = config
         if skip_norm:
             env["SKIP_NORM"] = "1"
+        env.update(extra_env or {})
+        script = self.script.with_name(script_name) if script_name else self.script
         return subprocess.run(
-            ["bash", str(self.script)], env=env, capture_output=True, text=True, check=False, timeout=10
+            ["bash", str(script)], env=env, capture_output=True, text=True, check=False, timeout=10
         )
+
+    def test_sft_entry_selects_sft_despite_an_inherited_iql_method(self):
+        result = self.launch(method="iql", script_name="train_sft_pku_franka_collect_objects.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual(calls[-1][:2], ["scripts/train.py", "pi05_pku_franka_collect_objects"])
+
+    def test_iql_entry_starts_from_base_despite_an_inherited_sft_checkpoint(self):
+        base_params = self.root / "pi05_base/params"
+        base_params.mkdir(parents=True)
+        result = self.launch(
+            method="sft", script_name="train_iql_pku_franka_collect_objects.sh",
+            extra_env={"INIT_CHECKPOINT": str(self.root / "old_sft/19999"), "WEIGHT_PARAMS_PATH": str(base_params)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
+        training = calls[-1]
+        self.assertEqual(training[:2], ["scripts/train_iql.py", "pi05_pku_franka_collect_objects_iql"])
+        self.assertEqual(training[training.index("--weight-loader.params-path") + 1], str(base_params))
+        self.assertNotIn("--resume", training)
 
     def test_all_six_presets_route_to_matching_trainer_and_norm_assets(self):
         for representation in ["absolute", "relative"]:
