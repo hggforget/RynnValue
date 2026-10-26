@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pi0.5 SFT on the converted FR3 collection. This script computes matching norms first.
+# Run directly: defaults select the dataset, GPUs, experiment name, and normalization.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,7 +13,8 @@ DEFAULT_PYTHON=/opt/conda/envs/pi-rl/bin/python
 [[ -x "$DEFAULT_PYTHON" ]] || DEFAULT_PYTHON=python3
 PYTHON="${PYTHON:-$DEFAULT_PYTHON}"
 CONFIG=pi05_pku_franka_unified_relative
-DATA_ROOT="${DATA_ROOT:-/oss/embodied-ai-data/pku/fr3_unified_5hz_relative}"
+DEFAULT_DATA_ROOT=/oss/embodied-ai-data/pku/fr3_unified_5hz_relative
+DATA_ROOT="${DATA_ROOT:-$DEFAULT_DATA_ROOT}"
 WEIGHT_PARAMS_PATH="${WEIGHT_PARAMS_PATH:-/oss/embodied-ai-data/pku/pi05_base/params}"
 EXP_NAME="${EXP_NAME:-fr3_unified_relative_$(date +%m%d_%H%M%S)}"
 CKPT_BASE_DIR="${CKPT_BASE_DIR:-$PROJECT_ROOT/../output/checkpoints}"
@@ -43,14 +44,9 @@ if [[ ! -d "$WEIGHT_PARAMS_PATH" ]]; then
     echo "Base checkpoint is not mounted: $WEIGHT_PARAMS_PATH" >&2
     exit 1
 fi
-if [[ "${SKIP_NORM:-0}" != "1" ]]; then
-    JAX_PLATFORMS=cpu XLA_PYTHON_CLIENT_PREALLOCATE=false \
-        "$PYTHON" scripts/compute_norm_stats_fast.py \
-        --config-name "$CONFIG" --dataset-root "$DATA_ROOT" --num-workers 0 --batch-size 1
-fi
-
 NORM_STATS_FILE="./assets/$CONFIG/pku_franka_unified_relative/norm_stats.json"
-"$PYTHON" - "$NORM_STATS_FILE" <<'PY'
+validate_norm_stats() {
+    "$PYTHON" - "$NORM_STATS_FILE" <<'PY'
 import json
 import sys
 
@@ -61,6 +57,34 @@ for key in ("state", "actions"):
         if len(stats.get(key, {}).get(field, [])) != 7:
             raise SystemExit(f"Invalid {key}.{field} norms; run with SKIP_NORM=0.")
 PY
+}
+
+# Reuse bundled stats for the default collection. Compute them automatically if
+# absent or invalid; changing the collection defaults to recomputing its stats.
+if [[ "$DATA_ROOT" == "$DEFAULT_DATA_ROOT" ]]; then
+    NORM_MODE="${SKIP_NORM:-auto}"
+else
+    NORM_MODE="${SKIP_NORM:-0}"
+fi
+case "$NORM_MODE" in
+    auto)
+        if validate_norm_stats >/dev/null 2>&1; then
+            NORM_MODE=1
+        else
+            NORM_MODE=0
+        fi
+        ;;
+    0|1) ;;
+    *) echo "SKIP_NORM must be auto, 0, or 1" >&2; exit 1 ;;
+esac
+if [[ "$NORM_MODE" == "0" ]]; then
+    JAX_PLATFORMS=cpu XLA_PYTHON_CLIENT_PREALLOCATE=false \
+        "$PYTHON" scripts/compute_norm_stats_fast.py \
+        --config-name "$CONFIG" --dataset-root "$DATA_ROOT" --num-workers 0 --batch-size 1
+fi
+validate_norm_stats
+
+echo "Starting $CONFIG: experiment=$EXP_NAME, GPUs=$GPUS, data=$DATA_ROOT"
 
 exec "$PYTHON" scripts/train.py "$CONFIG" \
     --exp-name "$EXP_NAME" \
