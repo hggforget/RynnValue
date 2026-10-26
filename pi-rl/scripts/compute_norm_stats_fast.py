@@ -191,6 +191,7 @@ def main(
     config_name: str,
     max_frames: int | None = None,
     repo_id: str | None = None,
+    dataset_root: str | None = None,
     num_workers: int | None = None,
     batch_size: int | None = None,
     skip_video: bool = True,
@@ -207,6 +208,7 @@ def main(
         max_frames: Optional cap on the number of frames to scan.
         repo_id: Optional override of the dataset repo id (useful when one TrainConfig is
             reused across multiple sub-datasets, e.g. per-task RoboTwin dumps).
+        dataset_root: Optional collection-root override for factories exposing dataset_root.
         num_workers: PyTorch DataLoader worker processes. Default ``min(16, cpu_count)``.
             The stock script uses ``TrainConfig.num_workers`` which is typically 2.
         batch_size: Loader batch size. Default ``TrainConfig.batch_size``.
@@ -240,6 +242,10 @@ def main(
         config = dataclasses.replace(config, data=data)
     if repo_id is not None:
         config = dataclasses.replace(config, data=dataclasses.replace(config.data, repo_id=repo_id))
+    if dataset_root is not None:
+        if not hasattr(config.data, "dataset_root"):
+            raise ValueError(f"Config {config_name} does not support --dataset-root")
+        config = dataclasses.replace(config, data=dataclasses.replace(config.data, dataset_root=dataset_root))
     if episode_filter_path is not None and hasattr(config.data, "episode_filter_path"):
         config = dataclasses.replace(
             config, data=dataclasses.replace(config.data, episode_filter_path=episode_filter_path)

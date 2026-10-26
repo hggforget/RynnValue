@@ -27,6 +27,7 @@ import openpi.policies.libero_policy as libero_policy
 import openpi.policies.pku_franka_collect_policy as pku_franka_collect_policy
 import openpi.policies.pku_franka_collect_rl_policy as pku_franka_collect_rl_policy
 import openpi.policies.pku_franka_policy as pku_franka_policy
+import openpi.policies.pku_franka_unified_policy as pku_franka_unified_policy
 import openpi.policies.robotwin_policy as robotwin_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -846,6 +847,91 @@ class LeRobotPkuFrankaDataConfig(DataConfigFactory):
             ),
             model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
             action_sequence_keys=("actions",),
+            video_backend=self.video_backend,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPkuFrankaUnifiedDataConfig(MultiDataConfigFactory):
+    """Mix 5 Hz FR3 repos while preserving optional wrist cameras per sample."""
+
+    dataset_root: str = "/oss/embodied-ai-data/pku/fr3_unified_5hz_relative"
+    dataset_names: tuple[str, ...] = (
+        "fr3_drawer_multitask_90", "fr3_long", "fr3_long_sft_clean", "fr3_open",
+        "fr3_pick", "fr3_pick_spacemouse", "fr3_put_on_plate_cotrain_0712",
+        "fr3_put_on_plate_cotrain_0712-1", "fr3_put_on_plate_cotrain_0713",
+        "fr3_put_on_plate_cotrain_0905", "fr3_collect_objects_20261017",
+    )
+    # Keep the cleaned long-task variant without double-counting its source demos.
+    exclude_dataset_names: tuple[str, ...] = ("fr3_long",)
+    excluded_collect_episode_ids: tuple[int, ...] = (0, 2, 14, 21, 47, 52, 78, 83)
+    video_backend: str = "pyav"
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MixedMultiDataConfig:
+        import json
+
+        root = pathlib.Path(self.dataset_root)
+        if (root / "camera_update.pending.json").is_file():
+            raise ValueError(f"Unified FR3 camera update is still in progress: {root}")
+        repo_ids = self.repo_ids or tuple(
+            str(root / name) for name in self.dataset_names if name not in self.exclude_dataset_names
+        )
+        if not repo_ids or len(set(repo_ids)) != len(repo_ids):
+            raise ValueError("Unified FR3 training requires a non-empty list of distinct dataset paths")
+        manifest_path = root / "manifest.json"
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text())
+            if not manifest.get("conversion_complete"):
+                raise ValueError(f"Unified FR3 conversion is incomplete: {root}")
+            if not manifest.get("source_controller_semantics_verified_for_all", False):
+                logging.warning("Unified FR3 source control semantics remain partially unverified; see %s", manifest_path)
+
+        episode_ids = {}
+        available = [(pathlib.Path(repo) / "meta/info.json").is_file() for repo in repo_ids]
+        # Serving a checkpoint does not require the training datasets to be mounted.
+        if any(available) and not all(available):
+            raise FileNotFoundError(f"Missing unified FR3 datasets: {[repo for repo, ok in zip(repo_ids, available, strict=True) if not ok]}")
+        if all(available):
+            for repo in repo_ids:
+                path = pathlib.Path(repo)
+                info = json.loads((path / "meta/info.json").read_text())
+                features = info["features"]
+                if info["fps"] != 5:
+                    raise ValueError(f"Unified FR3 training requires 5 Hz data: {repo}")
+                if features.get(pku_franka_unified_policy.IMAGE_KEY, {}).get("dtype") != "video":
+                    raise ValueError(f"Missing unified primary video in {repo}")
+                wrist = features.get(pku_franka_unified_policy.WRIST_KEY)
+                if wrist is not None and wrist.get("dtype") != "video":
+                    raise ValueError(f"Unified wrist camera must be a video when present: {repo}")
+                for key in (pku_franka_unified_policy.STATE_KEY, pku_franka_unified_policy.ACTION_KEY):
+                    if features.get(key, {}).get("shape") != [7]:
+                        raise ValueError(f"Unified FR3 requires {key} with shape [7]: {repo}")
+                action_feature = features[pku_franka_unified_policy.ACTION_KEY]
+                if action_feature.get("representation") != "relative_delta_pose":
+                    raise ValueError(f"Unified FR3 requires recorded relative actions: {repo}")
+                for key in (pku_franka_unified_policy.STATE_KEY, pku_franka_unified_policy.ACTION_KEY):
+                    if features[key].get("gripper_convention") != "0_closed_1_open":
+                        raise ValueError(f"Unified FR3 requires normalized opening/command grippers: {repo}")
+                if path.name == "fr3_collect_objects_20261017" and self.excluded_collect_episode_ids:
+                    kept = pku_franka_collect_policy.training_episode_ids(repo, self.excluded_collect_episode_ids)
+                    if kept is not None:
+                        episode_ids[repo] = kept
+
+        base = self.create_base_multi_config(assets_dirs, model_config, repo_ids)
+        # MultiLeRobotDataset intersects feature keys and would discard a wrist
+        # camera absent from other repos. The per-repo ConcatDataset keeps it.
+        base = MixedMultiDataConfig(**{field.name: getattr(base, field.name) for field in dataclasses.fields(base)})
+        return dataclasses.replace(
+            base,
+            data_transforms=_transforms.Group(
+                inputs=[pku_franka_unified_policy.PkuFrankaUnifiedInputs()],
+                outputs=[pku_franka_policy.PkuFrankaOutputs()],
+            ),
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=(pku_franka_unified_policy.ACTION_KEY,),
+            prompt_from_task=True,
+            episode_ids=episode_ids or None,
             video_backend=self.video_backend,
         )
 
@@ -2285,6 +2371,33 @@ class TrainConfig:
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
+    TrainConfig(
+        name="pi05_pku_franka_unified_relative",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=True),
+        data=LeRobotPkuFrankaUnifiedDataConfig(
+            repo_id="pku_franka_unified_relative",
+            assets=AssetsConfig(asset_id="pku_franka_unified_relative"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+        batch_size=16,
+        num_workers=4,
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=20_000, decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=1_000,
+        keep_period=5_000,
+        fsdp_devices=1,
+        policy_metadata={
+            "fps": 5, "action_representation": "relative", "action_dim": 7,
+            "state_dim": 7, "gripper_convention": "0_closed_1_open",
+            "image_keys": ("base_0_rgb", "left_wrist_0_rgb"),
+            "optional_image_keys": ("left_wrist_0_rgb",),
+        },
+    ),
     # FR3 collect-objects dataset: 30 Hz, primary + wrist RGB, 64 episodes.
     # The six excluded episodes are explicitly marked failed in episodes.jsonl.
     # Train on absolute Cartesian targets, with measured state only (no target leakage).
