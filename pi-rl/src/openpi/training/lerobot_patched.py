@@ -71,9 +71,10 @@ class PatchedLeRobotDataset(_ld.LeRobotDataset):
     of consecutive frames with ``[33.57, 0.0]``).
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, video_keys: tuple[str, ...] | None = None, **kwargs):
         import lerobot.common.datasets.utils as _ld_utils
 
+        self._selected_video_keys = video_keys
         _orig_check = getattr(_ld_utils, "check_timestamps_sync", None)
 
         def _noop_check(*a, **kw):
@@ -99,6 +100,26 @@ class PatchedLeRobotDataset(_ld.LeRobotDataset):
 
         # Re-build episode_data_index keyed by *original* ep_idx (bug fix).
         self.episode_data_index = patched_get_episode_data_index(self.meta.episodes, self.episodes)
+        if video_keys is not None and (
+            len(set(video_keys)) != len(video_keys) or set(video_keys) - set(self.meta.video_keys)
+        ):
+            raise ValueError(f"Invalid selected video fields: {video_keys}; available: {self.meta.video_keys}")
+
+    def _query_videos(self, query_timestamps, ep_idx):
+        if self._selected_video_keys is not None:
+            query_timestamps = {key: times for key, times in query_timestamps.items() if key in self._selected_video_keys}
+        return super()._query_videos(query_timestamps, ep_idx)
+
+    def load_hf_dataset(self):
+        # Metadata already enumerates every episode. Directory-pattern discovery
+        # repeatedly walks all NAS files looking for train/validation/test names,
+        # even though LeRobot uses episode_*.parquet. Preserve the metadata order
+        # and the exact episode filter while loading the known paths directly.
+        episodes = self.episodes if self.episodes is not None else self.meta.episodes
+        files = [str(self.root / self.meta.get_data_file_path(index)) for index in episodes]
+        dataset = _ld.load_dataset("parquet", data_files=files, split="train")
+        dataset.set_transform(_ld.hf_transform_to_torch)
+        return dataset
 
 
 class PatchedMultiLeRobotDataset(_ld.MultiLeRobotDataset):
@@ -115,6 +136,7 @@ class PatchedMultiLeRobotDataset(_ld.MultiLeRobotDataset):
         tolerances_s: dict | None = None,
         download_videos: bool = True,
         video_backend: str | None = None,
+        video_keys: tuple[str, ...] | None = None,
     ):
         # Skip MultiLeRobotDataset.__init__ entirely (it would build stock LeRobotDatasets).
         # Hop straight to its parent (object/torch.utils.data.Dataset) for the base setup.
@@ -132,6 +154,7 @@ class PatchedMultiLeRobotDataset(_ld.MultiLeRobotDataset):
                 tolerance_s=self.tolerances_s[repo_id],
                 download_videos=download_videos,
                 video_backend=video_backend,
+                video_keys=video_keys,
             )
             for repo_id in repo_ids
         ]

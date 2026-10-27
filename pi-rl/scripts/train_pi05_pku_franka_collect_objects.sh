@@ -42,6 +42,25 @@ if [[ -z "${GPUS:-}" ]]; then
 fi
 IFS=',' read -ra GPU_LIST <<< "$GPUS"
 FSDP_DEVICES="${FSDP_DEVICES:-${#GPU_LIST[@]}}"
+if [[ "$METHOD" == "sft" ]]; then
+    BATCH_SIZE_PER_GPU="${BATCH_SIZE_PER_GPU:-16}"
+    if [[ ! "$BATCH_SIZE_PER_GPU" =~ ^[1-9][0-9]*$ ]]; then
+        echo "BATCH_SIZE_PER_GPU must be a positive integer." >&2
+        exit 1
+    fi
+    BATCH_SIZE="${BATCH_SIZE:-$((BATCH_SIZE_PER_GPU * ${#GPU_LIST[@]}))}"
+    CLI_ARGS=("$@")
+    for ((i=0; i<${#CLI_ARGS[@]}; i++)); do
+        case "${CLI_ARGS[i]}" in
+            --batch-size) BATCH_SIZE="${CLI_ARGS[i+1]:-}" ;;
+            --batch-size=*) BATCH_SIZE="${CLI_ARGS[i]#*=}" ;;
+        esac
+    done
+    if [[ ! "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || ((BATCH_SIZE % ${#GPU_LIST[@]} != 0)); then
+        echo "Global BATCH_SIZE must be positive and divisible by the selected GPU count." >&2
+        exit 1
+    fi
+fi
 CKPT_BASE_DIR="${CKPT_BASE_DIR:-./checkpoints}"
 WEIGHT_PARAMS_PATH="${WEIGHT_PARAMS_PATH:-/oss/embodied-ai-data/pku/pi05_base/params}"
 
@@ -103,6 +122,10 @@ TRAIN_ARGS=(
     --checkpoint-base-dir "$CKPT_BASE_DIR"
     --fsdp-devices "$FSDP_DEVICES"
 )
+if [[ "$METHOD" == "sft" ]]; then
+    TRAIN_ARGS+=(--batch-size "$BATCH_SIZE")
+    echo "Starting $CONFIG: GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, batch_per_gpu=$((BATCH_SIZE / ${#GPU_LIST[@]})), experiment=$EXP_NAME"
+fi
 if [[ -n "${INIT_CHECKPOINT:-}" ]]; then
     TRAIN_ARGS+=(--weight-loader.params-path "${INIT_CHECKPOINT%/}/params")
 elif [[ -d "$WEIGHT_PARAMS_PATH" ]]; then

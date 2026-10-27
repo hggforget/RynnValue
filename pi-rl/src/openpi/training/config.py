@@ -24,6 +24,7 @@ import openpi.policies.franka_dual_policy as franka_dual_policy
 import openpi.policies.franka_optimized_policy as franka_optimized_policy
 import openpi.policies.franka_single_policy as franka_single_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.lingdong_policy as lingdong_policy
 import openpi.policies.pku_franka_collect_policy as pku_franka_collect_policy
 import openpi.policies.pku_franka_collect_rl_policy as pku_franka_collect_rl_policy
 import openpi.policies.pku_franka_policy as pku_franka_policy
@@ -100,6 +101,8 @@ class DataConfig:
 
     # Optional LeRobot video decoder override; None uses LeRobot's platform default.
     video_backend: str | None = None
+    # Decode only these source video fields when set; metadata remains unchanged.
+    video_keys: tuple[str, ...] | None = None
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
@@ -820,6 +823,31 @@ class LeRobotRobotwinMultiDataConfig(MultiDataConfigFactory):
             model_transforms=model_transforms,
             action_sequence_keys=("action",),
             episode_ids=episode_ids,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
+    """Read the merged final Tron2 dataset with two task prompts and 8-D right control."""
+
+    dataset_root: str = lingdong_policy.DEFAULT_DATASET_ROOT
+    dataset_names: tuple[str, ...] = lingdong_policy.DATASET_NAMES
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
+        repo_ids = self.repo_ids or tuple(str(pathlib.Path(self.dataset_root) / name) for name in self.dataset_names)
+        state_indices, action_indices = lingdong_policy.dataset_indices(repo_ids, allow_unmounted=True)
+        return dataclasses.replace(
+            self.create_base_multi_config(assets_dirs, model_config, repo_ids),
+            data_transforms=_transforms.Group(
+                inputs=[lingdong_policy.LingdongRightArmInputs(state_indices, action_indices)],
+                outputs=[lingdong_policy.LingdongRightArmOutputs()],
+            ),
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=("action",),
+            prompt_from_task=True,
+            video_backend="pyav",
+            video_keys=lingdong_policy.VIDEO_KEYS,
         )
 
 
@@ -2369,8 +2397,47 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+# Shared by Lingdong and the collect-objects SFT reference launcher.
+_COLLECT_OBJECTS_SFT_HYPERPARAMS = dict(
+    batch_size=16,
+    num_workers=4,
+    num_train_steps=20_000,
+    lr_schedule=_optimizer.CosineDecaySchedule(
+        warmup_steps=1_000, peak_lr=5e-5, decay_steps=20_000, decay_lr=5e-6,
+    ),
+    optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    ema_decay=0.999,
+    log_interval=100,
+    save_interval=1_000,
+    keep_period=5_000,
+    seed=42,
+    fsdp_devices=1,
+)
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
+    TrainConfig(
+        **_COLLECT_OBJECTS_SFT_HYPERPARAMS,
+        name=lingdong_policy.CONFIG_NAME,
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+        data=LeRobotLingdongRightArmDataConfig(
+            repo_id=lingdong_policy.ASSET_ID,
+            assets=AssetsConfig(asset_id=lingdong_policy.ASSET_ID),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/rynnbot_hangzhou/hdc/pku/openpi_cache/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        checkpoint_base_dir="./checkpoints",
+        policy_metadata={
+            "fps": 30, "action_dim": 8, "state_dim": 8,
+            "action_representation": "recorded_joint_targets",
+            "channel_names": lingdong_policy.RIGHT_NAMES,
+            "image_keys": ("base_0_rgb", "right_wrist_0_rgb"),
+            "source_image_keys": lingdong_policy.VIDEO_KEYS,
+            "gripper_convention": "recorded_continuous_value_high_open",
+        },
+    ),
     TrainConfig(
         name="pi05_pku_franka_unified_relative",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=True),
@@ -2402,6 +2469,7 @@ _CONFIGS = [
     # The six excluded episodes are explicitly marked failed in episodes.jsonl.
     # Train on absolute Cartesian targets, with measured state only (no target leakage).
     TrainConfig(
+        **_COLLECT_OBJECTS_SFT_HYPERPARAMS,
         name="pi05_pku_franka_collect_objects",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
         data=LeRobotPkuFrankaCollectDataConfig(
@@ -2413,20 +2481,6 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         checkpoint_base_dir="./checkpoints",
-        batch_size=16,
-        num_workers=4,
-        num_train_steps=20_000,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=5e-5,
-            decay_steps=20_000,
-            decay_lr=5e-6,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        ema_decay=0.999,
-        save_interval=1_000,
-        keep_period=5_000,
-        fsdp_devices=1,
     ),
     TrainConfig(
         name="pi05_pku_franka_collect_objects_iql",

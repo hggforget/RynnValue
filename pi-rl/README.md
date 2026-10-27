@@ -15,6 +15,38 @@ This is an experiment: $\pi_0$ was developed for our own robots, which differ fr
 
 Pi0.5 checkpoint serving and the Franka replay/live-observation client connect directly over WebSocket. See the [cross-machine inference guide](examples/pku_franka/inference.md).
 
+## Lingdong Tron2 right-arm training
+
+`pi05_lingdong_right_arm` fine-tunes Pi0.5 on the single merged dataset `/mnt/rynnbot_hangzhou/hdc/pku/datasets/lingdong/lerobot_2026-10-26_12-09-32_final`. It contains 2,810 startup-trimmed episodes and 854,106 frames, with `task_index=0` for pick-up and `task_index=1` for put-down. Sampling is uniform over all retained frames. Episodes are ordered by their original source index and reindexed from zero.
+
+Only `observation.images.cam_high` and the already corrected `observation.images.cam_right_wrist` are decoded, mapped to `base_0_rgb` and `right_wrist_0_rgb`. Both state and action contain these eight recorded channels in order: `abad_R_Joint`, `hip_R_Joint`, `yaw_R_Joint`, `knee_R_Joint`, `wrist_yaw_R_Joint`, `wrist_pitch_R_Joint`, `wrist_roll_R_Joint`, `right_gripper`. Their canonical raw indices are `[7,8,9,10,11,12,13,17]`; the adapter resolves actual indices from metadata names. Joint targets and continuous gripper values are preserved. Model padding extends eight physical channels to the pretrained 32-D layout; inference outputs are reduced back to eight channels.
+
+The user confirmed the pick-up wrist views and requested a further left/right MP4 exchange only for the trimmed put-down dataset. The merged version independently copies the resulting MP4 files under their current camera names, preserving each task's correction. The training adapter reads the final named right camera for both tasks without another swap. Dataset loading rejects unfinished merge/correction journals.
+
+```bash
+# Default: all GPUs, batch 16 per GPU (8 GPUs -> global 128), 20,000 steps.
+bash scripts/train_pi05_lingdong_right_arm.sh
+
+# Single GPU, global batch 16.
+GPUS=0 bash scripts/train_pi05_lingdong_right_arm.sh
+
+# Inspect resolved GPUs, global batch, SSD cache paths and command without training.
+DRY_RUN=1 bash scripts/train_pi05_lingdong_right_arm.sh
+```
+
+The launcher follows `train_sft_pku_franka_collect_objects.sh`: automatic GPU discovery and FSDP across the selected devices. Both SFT launchers default to `BATCH_SIZE_PER_GPU=16`, so the global batch is 16 times the GPU count. Override the global batch with `BATCH_SIZE` or `--batch-size`; it must be divisible by the selected GPU count. The Lingdong and Franka collect-objects SFT presets share `_COLLECT_OBJECTS_SFT_HYPERPARAMS`: 20,000 steps, 4 workers, cosine learning rate 5e-5 to 5e-6 with 1,000 warmup steps, AdamW with gradient clipping at 1.0, EMA 0.999, logging every 100 steps, checkpointing every 1,000 steps, and retaining each 5,000-step checkpoint. Model action horizon remains 30 frames at 30 FPS.
+
+Lingdong automatically reuses the verified final-dataset and base-weight SSD caches under `/tmp/lingdong_training_cache` when they match the source manifests. Otherwise it uses the canonical dataset and parameters under `/mnt/rynnbot_hangzhou/hdc/pku`. Explicit `DATA_ROOT` and `WEIGHT_PARAMS_PATH` take priority. `INIT_CHECKPOINT` selects a checkpoint's `params` directory for weight initialization. Override `GPUS`, `FSDP_DEVICES`, `BATCH_SIZE_PER_GPU`, `BATCH_SIZE`, `EXP_NAME`, or `CKPT_BASE_DIR` as needed; extra CLI arguments are forwarded to `scripts/train.py`. Existing experiment directories require an explicit `--resume` or a new experiment name. Updating the launcher does not change an already-running job's GPU selection or batch.
+
+Normalization runs on CPU before training, using the selected eight channels of every retained Parquet frame, with exact pooled 1%/99% quantiles and no video decoding. `SKIP_NORM=1` reuses existing statistics but still verifies the current source fingerprint and finite 8-D values. Assets are stored in `assets/pi05_lingdong_right_arm/lingdong_right_arm/`; their manifest records input metadata/checksum fingerprints. To recompute or validate explicitly:
+
+```bash
+PYTHONPATH=src python scripts/compute_lingdong_norm_stats.py
+PYTHONPATH=src python scripts/compute_lingdong_norm_stats.py --check
+```
+
+The data adapter is [lingdong_policy.py](src/openpi/policies/lingdong_policy.py), and the registered factory/preset is in [training/config.py](src/openpi/training/config.py). For serving, `observation.state` may be the raw 18-D vector or an already selected 8-D vector in the order above; provide the two camera fields and a task prompt. The input datasets remain unchanged.
+
 ## Updates
 
 - [Sept 2025] We released PyTorch support in openpi.

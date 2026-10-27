@@ -87,6 +87,7 @@ def create_rl_dataset(
     raw = _lerobot_patched.PatchedLeRobotDataset(
         repo_id, delta_timestamps=delta_timestamps, video_backend="pyav",
         episodes=list(data_config.episode_ids) if data_config.episode_ids else None,
+        video_keys=data_config.video_keys,
     )
     dataset: _data_loader.Dataset = raw
     if data_config.prompt_from_task:
