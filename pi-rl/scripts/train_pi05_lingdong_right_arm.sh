@@ -10,8 +10,8 @@ DEFAULT_PYTHON=/opt/conda/envs/pku-pi-rl/bin/python
 PYTHON="${PYTHON:-$DEFAULT_PYTHON}"
 CONFIG=pi05_lingdong_right_arm
 
-# Explicit paths take priority. Otherwise reuse the byte-verified SSD copies
-# prepared for this final dataset and base checkpoint when they are available.
+# Read training data from the OSS mount unless DATA_ROOT is explicitly set.
+# Base weights still reuse the byte-verified SSD copy when available.
 if [[ -n "${INIT_CHECKPOINT:-}" ]]; then
     WEIGHT_PARAMS_PATH="${INIT_CHECKPOINT%/}/params"
 fi
@@ -21,22 +21,11 @@ import json
 from pathlib import Path
 import sys
 
-default_data = Path('/mnt/rynnbot_hangzhou/hdc/pku/datasets/lingdong')
+default_data = Path('/oss/embodied-ai-data/lingdong')
 default_weights = Path('/mnt/rynnbot_hangzhou/hdc/pku/openpi_cache/openpi-assets/checkpoints/pi05_base/params')
 cache = Path('/tmp/lingdong_training_cache')
-name = 'lerobot_2026-10-26_12-09-32_final'
 data, weights = sys.argv[1:]
-if not data:
-    data = str(default_data)
-    try:
-        record = json.loads((cache / name / '.training_cache.json').read_text())
-        signature = hashlib.sha256((default_data / name / 'meta/file_checksums.json').read_bytes()).hexdigest()
-        if (record['status'] == 'complete' and record['source'] == str(default_data / name)
-                and record['source_inventory_sha256'] == signature
-                and (cache / name / 'meta/info.json').is_file()):
-            data = str(cache)
-    except (OSError, ValueError, KeyError):
-        pass
+data = data or str(default_data)
 if not weights:
     weights = str(default_weights)
     try:
