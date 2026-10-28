@@ -32,11 +32,16 @@ GPUS=0 bash scripts/train_pi05_lingdong_right_arm.sh
 
 # Inspect resolved GPUs, global batch, dataset/weight paths and command without training.
 DRY_RUN=1 bash scripts/train_pi05_lingdong_right_arm.sh
+
+# Restore the OSS checkpoint locally and resume to 20,000 total steps.
+bash scripts/resume_pi05_lingdong_right_arm.sh
 ```
 
 The launcher follows `train_sft_pku_franka_collect_objects.sh`: automatic GPU discovery and FSDP across the selected devices. Both SFT launchers default to `BATCH_SIZE_PER_GPU=16`, so the global batch is 16 times the GPU count. Override the global batch with `BATCH_SIZE` or `--batch-size`; it must be divisible by the selected GPU count. The Lingdong and Franka collect-objects SFT presets share `_COLLECT_OBJECTS_SFT_HYPERPARAMS`: 20,000 steps, 4 workers, cosine learning rate 5e-5 to 5e-6 with 1,000 warmup steps, AdamW with gradient clipping at 1.0, EMA 0.999, logging every 100 steps, checkpointing every 1,000 steps, and retaining each 5,000-step checkpoint. Model action horizon remains 30 frames at 30 FPS.
 
 The Lingdong launcher reads dataset files directly from `/oss/embodied-ai-data/lingdong` and base weights from `/oss/embodied-ai-data/pku/pi05_base/params`. Explicit `DATA_ROOT` and `WEIGHT_PARAMS_PATH` override these OSS paths. `INIT_CHECKPOINT` selects a checkpoint's `params` directory for weight initialization. Tokenizer resources use `OPENPI_DATA_HOME=/oss/embodied-ai-data/pku/openpi_cache` by default. Checkpoint output defaults to the relative path `../output/checkpoints`, resolved from the `pi-rl` directory. Override `GPUS`, `FSDP_DEVICES`, `BATCH_SIZE_PER_GPU`, `BATCH_SIZE`, `EXP_NAME`, `OPENPI_DATA_HOME`, or `CKPT_BASE_DIR` as needed; extra CLI arguments are forwarded to `scripts/train.py`. Existing experiment directories require an explicit `--resume` or a new experiment name. Updating the launcher does not change an already-running job's GPU selection or batch.
+
+The resume launcher defaults to experiment `lingdong_right_arm_1027_163358`. It reuses a complete local `10000` checkpoint, or copies that step's `params`, `train_state`, `assets`, and checkpoint metadata from the OSS mount into `../output/checkpoints` before resuming. The copy uses a temporary sibling directory and publishes it only after the transfer succeeds. Training resumes from the latest local checkpoint and writes subsequent checkpoints locally. `CKPT_BASE_DIR` overrides the local output root; `OSS_CKPT_BASE_DIR` overrides the mounted source root. `DRY_RUN=1` previews the copy and training command without transferring files or starting training.
 
 Normalization runs on CPU before training, using the selected eight channels of every retained Parquet frame, with exact pooled 1%/99% quantiles and no video decoding. `SKIP_NORM=1` reuses existing statistics but still verifies the current source fingerprint and finite 8-D values. Assets are stored in `assets/pi05_lingdong_right_arm/lingdong_right_arm/`; their manifest records input metadata/checksum fingerprints. To recompute or validate explicitly:
 
