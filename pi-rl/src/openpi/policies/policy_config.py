@@ -1,4 +1,5 @@
 # adapted from openpi
+from collections.abc import Callable
 import logging
 import os
 import pathlib
@@ -23,6 +24,7 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
+    policy_factory: Callable[..., _policy.Policy] | None = None,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -38,6 +40,8 @@ def create_trained_policy(
             from the checkpoint directory.
         pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda", "cuda:0").
                       If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
+        policy_factory: Optional policy constructor. Loading/transforms are shared;
+            the default constructs the original Policy without importing optional samplers.
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
@@ -73,7 +77,7 @@ def create_trained_policy(
         except ImportError:
             pytorch_device = "cpu"
 
-    return _policy.Policy(
+    return (policy_factory or _policy.Policy)(
         model,
         transforms=[
             *repack_transforms.inputs,

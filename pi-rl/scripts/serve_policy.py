@@ -1,8 +1,10 @@
 # adapted from openpi
 import dataclasses
 import enum
+import functools
 import logging
 import socket
+from typing import Literal
 
 import tyro
 
@@ -54,6 +56,13 @@ class Args:
     # Record the policy's behavior for debugging.
     record: bool = False
 
+    # Select a separate policy implementation; ordinary inference remains the default.
+    inference_mode: Literal["standard", "rtc"] = "standard"
+    rtc_max_guidance_weight: float = 10.0
+    rtc_prefix_schedule: Literal["exp", "linear", "hard"] = "exp"
+    # Optional metadata source override, useful for mounted OSS datasets.
+    dataset_root: str | None = None
+
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
@@ -100,10 +109,30 @@ def create_default_policy(env: EnvMode, *, default_prompt: str | None = None) ->
 
 def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
+    optional = {}
+    if args.inference_mode == "rtc":
+        if args.dsrl_ckpt_dir or not isinstance(args.policy, Checkpoint):
+            raise ValueError("RTC requires an explicit Lingdong checkpoint and cannot be combined with DSRL")
+        if args.policy.config != "pi05_lingdong_right_arm":
+            raise ValueError("RTC currently supports config pi05_lingdong_right_arm")
+        from openpi.models.rtc import RTCConfig
+        from openpi.policies.rtc_policy import RTCPolicy
+
+        optional["policy_factory"] = functools.partial(
+            RTCPolicy,
+            rtc_config=RTCConfig(args.rtc_max_guidance_weight, args.rtc_prefix_schedule),
+        )
     match args.policy:
         case Checkpoint():
+            config = _config.get_config(args.policy.config)
+            if args.dataset_root is not None:
+                if not hasattr(config.data, "dataset_root"):
+                    raise ValueError("This policy config does not accept a dataset_root override")
+                config = dataclasses.replace(
+                    config, data=dataclasses.replace(config.data, dataset_root=args.dataset_root)
+                )
             base_policy = _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                config, args.policy.dir, default_prompt=args.default_prompt, **optional
             )
         case Default():
             base_policy = create_default_policy(args.env, default_prompt=args.default_prompt)
@@ -126,6 +155,7 @@ def create_policy(args: Args) -> _policy.Policy:
 def main(args: Args) -> None:
     policy = create_policy(args)
     policy_metadata = dict(policy.metadata)
+    policy_metadata["inference_mode"] = args.inference_mode
     if isinstance(args.policy, Checkpoint):
         policy_metadata.update(config=args.policy.config, checkpoint=args.policy.dir)
 

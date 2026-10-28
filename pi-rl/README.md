@@ -52,6 +52,48 @@ PYTHONPATH=src python scripts/compute_lingdong_norm_stats.py --dataset-root /oss
 
 The data adapter is [lingdong_policy.py](src/openpi/policies/lingdong_policy.py), and the registered factory/preset is in [training/config.py](src/openpi/training/config.py). For serving, `observation.state` may be the raw 18-D vector or an already selected 8-D vector in the order above; provide the two camera fields and a task prompt. The input datasets remain unchanged.
 
+Lingdong supports independent standard and inference-time RTC serving with the same JAX checkpoint. Standard inference remains the default. The original `Pi0.sample_actions`, `Policy`, and synchronous `ActionChunkBroker` are unchanged; RTC lives in separate sampler, policy, and asynchronous broker modules. RTC uses guided inpainting from [Real-Time Execution of Action Chunking Flow Policies](https://arxiv.org/abs/2506.07339), with no retraining or per-token timestep conditioning.
+
+```bash
+# Run from pi-rl, using the existing inference environment.
+PYTHON=/opt/conda/envs/pi-rl/bin/python bash scripts/serve_pi05_lingdong_right_arm.sh
+
+# Explicit RTC server; CHECKPOINT overrides the default OSS step-10000 checkpoint.
+PYTHON=/opt/conda/envs/pi-rl/bin/python INFERENCE_MODE=rtc PORT=8001 \
+    bash scripts/serve_pi05_lingdong_right_arm.sh
+
+# Inspect either command without loading weights.
+DRY_RUN=1 INFERENCE_MODE=rtc bash scripts/serve_pi05_lingdong_right_arm.sh
+```
+
+Both modes read weights, checkpoint normalization assets, tokenizer resources and dataset metadata from OSS by default. `CHECKPOINT`, `DATA_ROOT`, `OPENPI_DATA_HOME`, `HOST`, `PORT`, and `PYTHON` are optional overrides. RTC additionally accepts `RTC_MAX_GUIDANCE_WEIGHT` (default 10) and `RTC_PREFIX_SCHEDULE` (`exp`, `linear`, or `hard`; default `exp`). Here `hard` selects a binary guidance weight, not the hard action-prefix conditioning used by training-time RTC. RTC serving currently supports the Lingdong JAX checkpoint and does not combine with DSRL.
+
+Ordinary clients keep using `WebsocketClientPolicy` and the synchronous `ActionChunkBroker`. RTC clients explicitly construct the separate executor:
+
+On a separate robot/client machine, install this checkout's client package with `pip install -e /path/to/pi-rl/packages/openpi-client`. For local use without reinstalling, export `PYTHONPATH="$PWD/packages/openpi-client/src${PYTHONPATH:+:$PYTHONPATH}"` from `pi-rl` before running the client. This selects the new broker even when the environment has an older `openpi-client` installation. The serving launcher selects both local server and client packages automatically.
+
+```python
+from openpi_client.websocket_client_policy import WebsocketClientPolicy
+from openpi_client.rtc_action_chunk_broker import RTCActionChunkBroker
+
+client = WebsocketClientPolicy(host="YOUR_SERVER", port=8001)
+broker = RTCActionChunkBroker(client, execution_horizon=10, inference_delay=3)
+try:
+    broker.warmup(read_observation())  # Hold the robot stationary during compilation.
+    # Call once per 30-Hz policy tick. The first fresh chunk is synchronous;
+    # subsequent RPCs run in the background while queued actions execute.
+    while running:
+        action = broker.infer(read_observation())["actions"]
+        send_joint_targets(action)
+        wait_for_next_policy_tick()
+finally:
+    broker.close()
+```
+
+The broker checks the server's RTC metadata before execution, measures warm RPC latency, and requires `delay <= execution_horizon <= 30 - delay`. Tune the initial delay and execution horizon to the deployment's end-to-end latency. Warmup compiles both sampling paths before motion; it does not supply the initial execution chunk, which uses a fresh observation. The broker aligns responses by consumed action indices, keeps committed old commands if a result arrives early, and drops results invalidated by reset or prompt changes. All inference/reset calls use one serialized worker. Invalid responses, excessive latency, or queue exhaustion raise `RTCExecutionError`; the caller stops command execution and resets before restarting. `close()` interrupts pending socket I/O. The policy tick rate is 30 Hz; higher-rate servo interpolation belongs below this interface.
+
+For direct RPC integration, an RTC request adds `rtc={"previous_actions": pending_actions, "inference_delay": d}` to the ordinary observation. `pending_actions` is the available future queue in physical eight-channel units, aligned to the observation's control step, with at most 30 rows. The server reuses training normalization and zero-padding, guides only the eight physical output channels, and returns a full `[30, 8]` chunk plus an RTC acknowledgment. The client owns queue alignment. An RTC server also accepts plain requests and uses the original sampler for them; an ordinary server never enables RTC implicitly. Prefixes are request-local, so no previous plan is shared between server connections.
+
 ## Updates
 
 - [Sept 2025] We released PyTorch support in openpi.
