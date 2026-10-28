@@ -33,7 +33,7 @@ GPUS=0 bash scripts/train_pi05_lingdong_right_arm.sh
 # Inspect resolved GPUs, global batch, dataset/weight paths and command without training.
 DRY_RUN=1 bash scripts/train_pi05_lingdong_right_arm.sh
 
-# Restore the OSS checkpoint locally and resume to 20,000 total steps.
+# Start a new experiment initialized from the OSS step-10000 weights.
 bash scripts/resume_pi05_lingdong_right_arm.sh
 ```
 
@@ -41,7 +41,7 @@ The launcher follows `train_sft_pku_franka_collect_objects.sh`: automatic GPU di
 
 The Lingdong launcher reads dataset files directly from `/oss/embodied-ai-data/lingdong` and base weights from `/oss/embodied-ai-data/pku/pi05_base/params`. Explicit `DATA_ROOT` and `WEIGHT_PARAMS_PATH` override these OSS paths. `INIT_CHECKPOINT` selects a checkpoint's `params` directory for weight initialization. Tokenizer resources use `OPENPI_DATA_HOME=/oss/embodied-ai-data/pku/openpi_cache` by default. Checkpoint output defaults to the relative path `../output/checkpoints`, resolved from the `pi-rl` directory. Override `GPUS`, `FSDP_DEVICES`, `BATCH_SIZE_PER_GPU`, `BATCH_SIZE`, `EXP_NAME`, `OPENPI_DATA_HOME`, or `CKPT_BASE_DIR` as needed; extra CLI arguments are forwarded to `scripts/train.py`. Existing experiment directories require an explicit `--resume` or a new experiment name. Updating the launcher does not change an already-running job's GPU selection or batch.
 
-The resume launcher defaults to experiment `lingdong_right_arm_1027_163358`. It reuses a complete local `10000` checkpoint, or copies that step's `params`, `train_state`, `assets`, and checkpoint metadata from the OSS mount into `../output/checkpoints` before resuming. The copy uses a temporary sibling directory and publishes it only after the transfer succeeds. Training resumes from the latest local checkpoint and writes subsequent checkpoints locally. `CKPT_BASE_DIR` overrides the local output root; `OSS_CKPT_BASE_DIR` overrides the mounted source root. `DRY_RUN=1` previews the copy and training command without transferring files or starting training.
+The `resume_pi05_lingdong_right_arm.sh` convenience launcher sets `INIT_CHECKPOINT` to `/oss/embodied-ai-data/lingdong/pi05_lingdong_right_arm/lingdong_right_arm_1027_163358/10000` and calls the normal training launcher. It reads the starting weights directly from OSS and uses the usual timestamped experiment name and local output directory. Training starts at step zero with a fresh optimizer and learning-rate schedule, for 20,000 steps by default. Override `INIT_CHECKPOINT` to select another starting checkpoint, and `EXP_NAME` to choose a new experiment name explicitly. `DRY_RUN=1` previews the training command.
 
 Normalization runs on CPU before training, using the selected eight channels of every retained Parquet frame, with exact pooled 1%/99% quantiles and no video decoding. `SKIP_NORM=1` reuses existing statistics but still verifies the current source fingerprint and finite 8-D values. Assets are stored in `assets/pi05_lingdong_right_arm/lingdong_right_arm/`; their manifest records input metadata/checksum fingerprints. To recompute or validate explicitly:
 
