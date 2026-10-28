@@ -1,0 +1,1 @@
+bash examples/lingdong_real/run.sh --policy websocket --port 8000 --task pick_up --execute --execute-steps 30 --max-cycles 100
