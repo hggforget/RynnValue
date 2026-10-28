@@ -10,42 +10,14 @@ DEFAULT_PYTHON=/opt/conda/envs/pku-pi-rl/bin/python
 PYTHON="${PYTHON:-$DEFAULT_PYTHON}"
 CONFIG=pi05_lingdong_right_arm
 
-# Read training data from the OSS mount unless DATA_ROOT is explicitly set.
-# Base weights still reuse the byte-verified SSD copy when available.
+# Read data and base weights directly from OSS unless explicitly overridden.
+DATA_ROOT="${DATA_ROOT:-/oss/embodied-ai-data/lingdong}"
+WEIGHT_PARAMS_PATH="${WEIGHT_PARAMS_PATH:-/oss/embodied-ai-data/pku/pi05_base/params}"
 if [[ -n "${INIT_CHECKPOINT:-}" ]]; then
     WEIGHT_PARAMS_PATH="${INIT_CHECKPOINT%/}/params"
 fi
-TRAINING_PATHS=$("$PYTHON" - "${DATA_ROOT:-}" "${WEIGHT_PARAMS_PATH:-}" <<'PY'
-import hashlib
-import json
-from pathlib import Path
-import sys
-
-default_data = Path('/oss/embodied-ai-data/lingdong')
-default_weights = Path('/mnt/rynnbot_hangzhou/hdc/pku/openpi_cache/openpi-assets/checkpoints/pi05_base/params')
-cache = Path('/tmp/lingdong_training_cache')
-data, weights = sys.argv[1:]
-data = data or str(default_data)
-if not weights:
-    weights = str(default_weights)
-    try:
-        record = json.loads((cache / 'pi05_base/source_manifest.json').read_text())
-        expected = record['files']['_METADATA']['sha256']
-        if (record['status'] == 'complete' and record['source'] == str(default_weights)
-                and hashlib.sha256((default_weights / '_METADATA').read_bytes()).hexdigest() == expected
-                and hashlib.sha256((cache / 'pi05_base/params/_METADATA').read_bytes()).hexdigest() == expected):
-            weights = str(cache / 'pi05_base/params')
-    except (OSError, ValueError, KeyError):
-        pass
-print(data)
-print(weights)
-PY
-)
-mapfile -t SELECTED_PATHS <<< "$TRAINING_PATHS"
-DATA_ROOT="${SELECTED_PATHS[0]}"
-WEIGHT_PARAMS_PATH="${SELECTED_PATHS[1]}"
 EXP_NAME="${EXP_NAME:-lingdong_right_arm_$(date +%m%d_%H%M%S)}"
-CKPT_BASE_DIR="${CKPT_BASE_DIR:-$PROJECT_ROOT/../output/checkpoints}"
+CKPT_BASE_DIR="${CKPT_BASE_DIR:-../output/checkpoints}"
 # Match train_sft_pku_franka_collect_objects.sh: use every visible physical GPU
 # unless the caller supplies GPUS; shard the model across the selected devices.
 if [[ -z "${GPUS:-}" ]]; then
@@ -80,7 +52,7 @@ fi
 export CUDA_VISIBLE_DEVICES="$GPUS"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.9}"
 if [[ -z "${OPENPI_DATA_HOME:-}" ]]; then
-    export OPENPI_DATA_HOME=/mnt/rynnbot_hangzhou/hdc/pku/openpi_cache
+    export OPENPI_DATA_HOME=/oss/embodied-ai-data/pku/openpi_cache
 fi
 if [[ ! -d "$WEIGHT_PARAMS_PATH" ]]; then
     echo "Pi0.5 base parameters are unavailable: $WEIGHT_PARAMS_PATH; set WEIGHT_PARAMS_PATH to a mounted params directory." >&2
@@ -100,7 +72,7 @@ TRAIN_ARGS=(
     --fsdp-devices "$FSDP_DEVICES"
     --batch-size "$BATCH_SIZE"
 )
-echo "Starting $CONFIG: data=$DATA_ROOT, weights=$WEIGHT_PARAMS_PATH, GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, batch_per_gpu=$((BATCH_SIZE / ${#GPU_LIST[@]})), experiment=$EXP_NAME"
+echo "Starting $CONFIG: data=$DATA_ROOT, weights=$WEIGHT_PARAMS_PATH, checkpoints=$CKPT_BASE_DIR, openpi_cache=$OPENPI_DATA_HOME, GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, batch_per_gpu=$((BATCH_SIZE / ${#GPU_LIST[@]})), experiment=$EXP_NAME"
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '%q ' "$PYTHON" "${TRAIN_ARGS[@]}" "$@"
     printf '\n'
