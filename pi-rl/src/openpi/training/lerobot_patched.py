@@ -26,10 +26,12 @@ from itertools import accumulate
 import logging
 from pathlib import Path
 
-import lerobot.common.datasets.lerobot_dataset as _ld
 from lerobot.common.constants import HF_LEROBOT_HOME
 from lerobot.common.datasets.compute_stats import aggregate_stats
+import lerobot.common.datasets.lerobot_dataset as _ld
 import torch
+
+from openpi.training import video_recovery
 
 
 def patched_get_episode_data_index(
@@ -107,8 +109,23 @@ class PatchedLeRobotDataset(_ld.LeRobotDataset):
 
     def _query_videos(self, query_timestamps, ep_idx):
         if self._selected_video_keys is not None:
-            query_timestamps = {key: times for key, times in query_timestamps.items() if key in self._selected_video_keys}
-        return super()._query_videos(query_timestamps, ep_idx)
+            query_timestamps = {
+                key: times for key, times in query_timestamps.items() if key in self._selected_video_keys
+            }
+        parent_query = super()._query_videos
+        result = {}
+        for camera, timestamps in query_timestamps.items():
+            result[camera] = video_recovery.read_video_with_recovery(
+                lambda camera=camera, timestamps=timestamps: parent_query({camera: timestamps}, ep_idx)[camera],
+                path=self.root / self.meta.get_video_file_path(ep_idx, camera),
+                timestamps=timestamps,
+                tolerance_s=self.tolerance_s,
+                backend=self.video_backend,
+                root=self.root,
+                episode=ep_idx,
+                camera=camera,
+            )
+        return result
 
     def load_hf_dataset(self):
         # Metadata already enumerates every episode. Directory-pattern discovery
@@ -134,7 +151,7 @@ class PatchedMultiLeRobotDataset(_ld.MultiLeRobotDataset):
         image_transforms: Callable | None = None,
         delta_timestamps: dict[list[float]] | None = None,
         tolerances_s: dict | None = None,
-        download_videos: bool = True,
+        download_videos: bool = True,  # noqa: FBT001, FBT002 - match the upstream constructor
         video_backend: str | None = None,
         video_keys: tuple[str, ...] | None = None,
     ):
@@ -173,8 +190,7 @@ class PatchedMultiLeRobotDataset(_ld.MultiLeRobotDataset):
         for repo_id, ds in zip(self.repo_ids, self._datasets, strict=True):
             extra_keys = set(ds.features).difference(intersection_features)
             logging.warning(
-                f"keys {extra_keys} of {repo_id} were disabled as they are not contained in all the "
-                "other datasets."
+                f"keys {extra_keys} of {repo_id} were disabled as they are not contained in all the other datasets."
             )
             self.disabled_features.update(extra_keys)
 

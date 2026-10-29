@@ -18,6 +18,7 @@ env/
 venv_*.txt
 
 # Training / evaluation artifacts
+output/
 outputs/
 baseline_eval_output/
 unsloth_compiled_cache/

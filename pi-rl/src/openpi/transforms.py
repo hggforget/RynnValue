@@ -246,6 +246,25 @@ class AbsoluteActions(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class StateInputDropout(DataTransformFn):
+    """Mark samples to omit state tokens; place only in training transforms.
+
+    Keep the measured state for normalization and shape handling. TokenizePrompt
+    consumes the marker before the sample reaches the model.
+    """
+
+    probability: float = 0.0
+
+    def __post_init__(self):
+        if not 0.0 <= self.probability <= 1.0:
+            raise ValueError("State input dropout probability must be between 0 and 1")
+
+    def __call__(self, data: DataDict) -> DataDict:
+        drop = self.probability == 1.0 or (self.probability > 0.0 and np.random.random() < self.probability)
+        return {**data, "_drop_state_input": drop}
+
+
+@dataclasses.dataclass(frozen=True)
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
     discrete_state_input: bool = False
@@ -254,7 +273,8 @@ class TokenizePrompt(DataTransformFn):
         if (prompt := data.pop("prompt", None)) is None:
             raise ValueError("Prompt is required")
 
-        if self.discrete_state_input:
+        drop_state = bool(data.pop("_drop_state_input", False))
+        if self.discrete_state_input and not drop_state:
             if (state := data.get("state", None)) is None:
                 raise ValueError("State is required.")
         else:

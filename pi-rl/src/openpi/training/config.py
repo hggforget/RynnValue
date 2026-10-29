@@ -24,6 +24,7 @@ import openpi.policies.franka_dual_policy as franka_dual_policy
 import openpi.policies.franka_optimized_policy as franka_optimized_policy
 import openpi.policies.franka_single_policy as franka_single_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.lingdong_language as lingdong_language
 import openpi.policies.lingdong_policy as lingdong_policy
 import openpi.policies.pku_franka_collect_policy as pku_franka_collect_policy
 import openpi.policies.pku_franka_collect_rl_policy as pku_franka_collect_rl_policy
@@ -89,6 +90,8 @@ class DataConfig:
     # before the data is normalized. See `model.Observation` and `model.Actions` to learn about the
     # normalized data.
     data_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
+    # Label and prompt transforms applied only by dataset loaders, before normalization.
+    training_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
     # Model specific transforms. Will be applied after the data is normalized.
     model_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
@@ -832,17 +835,44 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
 
     dataset_root: str = lingdong_policy.DEFAULT_DATASET_ROOT
     dataset_names: tuple[str, ...] = lingdong_policy.DATASET_NAMES
+    augment_prompts: bool = True
+    # Defaults to the validated episode-scene asset next to normalization statistics.
+    scene_prompts_path: str | None = None
+    # Training-only probability of omitting the entire state token segment.
+    state_dropout_prob: float = 0.5
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
+        state_dropout = _transforms.StateInputDropout(self.state_dropout_prob)
+        if self.state_dropout_prob > 0 and (
+            model_config.model_type != _model.ModelType.PI05 or not model_config.discrete_state_input
+        ):
+            raise ValueError("Lingdong state dropout requires pi05 with discrete_state_input=True")
         repo_ids = self.repo_ids or tuple(str(pathlib.Path(self.dataset_root) / name) for name in self.dataset_names)
         state_indices, action_indices = lingdong_policy.dataset_indices(repo_ids, allow_unmounted=True)
+        training_transforms: list[_transforms.DataTransformFn] = []
+        if self.augment_prompts:
+            scene_path = pathlib.Path(self.scene_prompts_path) if self.scene_prompts_path else (
+                pathlib.Path(self.assets.assets_dir or assets_dirs)
+                / (self.assets.asset_id or self.repo_id or lingdong_policy.ASSET_ID)
+                / lingdong_language.ASSET_NAME
+            )
+            if self.scene_prompts_path and not scene_path.is_file():
+                raise FileNotFoundError(f"Scene language asset is unavailable: {scene_path}")
+            scene_prompts = ()
+            if scene_path.is_file() and all((pathlib.Path(repo) / "meta/info.json").is_file() for repo in repo_ids):
+                scene_prompts = lingdong_language.load_scene_prompts(scene_path, repo_ids)
+            training_transforms.append(lingdong_policy.LingdongPromptAugmentation(scene_prompts))
+        training_transforms.append(lingdong_policy.LingdongTrainingActions(model_config.action_horizon, repo_ids))
+        if self.state_dropout_prob > 0:
+            training_transforms.append(state_dropout)
         return dataclasses.replace(
             self.create_base_multi_config(assets_dirs, model_config, repo_ids),
             data_transforms=_transforms.Group(
                 inputs=[lingdong_policy.LingdongRightArmInputs(state_indices, action_indices)],
                 outputs=[lingdong_policy.LingdongRightArmOutputs()],
             ),
+            training_transforms=_transforms.Group(inputs=training_transforms),
             model_transforms=ModelTransformFactory()(model_config),
             action_sequence_keys=("action",),
             prompt_from_task=True,
@@ -2435,7 +2465,9 @@ _CONFIGS = [
             "channel_names": lingdong_policy.RIGHT_NAMES,
             "image_keys": ("base_0_rgb", "right_wrist_0_rgb"),
             "source_image_keys": lingdong_policy.VIDEO_KEYS,
-            "gripper_convention": "recorded_continuous_value_high_open",
+            "gripper_convention": "binary_action_0_closed_1_open",
+            "gripper_action_binarization": lingdong_policy.gripper_binarization_spec(),
+            "state_gripper_convention": "recorded_continuous_value_high_open",
         },
     ),
     TrainConfig(

@@ -1,6 +1,7 @@
 """Tron2 right-arm joint control from the corrected, trimmed Lingdong datasets."""
 
 import dataclasses
+import functools
 import json
 import pathlib
 
@@ -25,6 +26,116 @@ RIGHT_NAMES = (
 )
 RIGHT_INDICES = (7, 8, 9, 10, 11, 12, 13, 17)
 ACTION_DIM = STATE_DIM = 8
+GRIPPER_THRESHOLD = 0.6
+GRIPPER_MIN_EXCURSION = 0.05
+PROMPT_VARIANTS = {
+    "pick up the object": (
+        "pick up the object",
+        "pick the object up",
+        "lift the object",
+        "lift up the object",
+        "grab the object and lift it",
+        "grasp the object and pick it up",
+        "take hold of the object and lift it",
+        "please pick up the object",
+        "please lift the object",
+        "pick up the item",
+        "lift the item",
+        "please pick the object up",
+    ),
+    "put down the object": (
+        "put down the object",
+        "put the object down",
+        "set down the object",
+        "set the object down",
+        "place the object down",
+        "lower the object and set it down",
+        "please put down the object",
+        "please set the object down",
+        "put down the item",
+        "set down the item",
+        "place the item down",
+        "please place the object down",
+    ),
+}
+
+
+def gripper_binarization_spec() -> dict:
+    return {
+        "encoding": "binary_0_closed_1_open",
+        "method": "episode_extrema_hysteresis_v1",
+        "initial_threshold": GRIPPER_THRESHOLD,
+        "min_excursion": GRIPPER_MIN_EXCURSION,
+        "median_filter_frames": 3,
+        "onset": "last_extremum_before_confirmed_motion",
+        "plateaus_and_terminal": "hold_previous_command",
+    }
+
+
+def detect_gripper_events(gripper: np.ndarray) -> tuple[np.ndarray, list[dict]]:
+    """Detect whole-episode opening/closing events, retaining commands through plateaus.
+
+    A three-frame median removes isolated interior spikes. A cumulative excursion
+    of 0.05 from the last extremum confirms a reversal; its label is backdated to
+    that extremum, so small initial steps belong to the same event. The 0.6
+    threshold initializes only the first state, never intermediate plateaus.
+    """
+    gripper = np.asarray(gripper, dtype=np.float32)
+    if gripper.ndim != 1 or len(gripper) == 0 or not np.isfinite(gripper).all():
+        raise ValueError("Expected a nonempty finite gripper trajectory [T]")
+    padded = np.pad(gripper, (1, 1), mode="edge")
+    smooth = np.median(np.stack((padded[:-2], padded[1:-1], padded[2:])), axis=0)
+    command = int(smooth[0] >= GRIPPER_THRESHOLD)
+    labels = np.full(len(gripper), command, dtype=np.uint8)
+    extremum = float(smooth[0])
+    extremum_frame = 0
+    events = []
+    for frame, raw_value in enumerate(smooth):
+        value = float(raw_value)
+        if (command == 0 and value <= extremum) or (command == 1 and value >= extremum):
+            extremum, extremum_frame = value, frame
+            continue
+        excursion = value - extremum if command == 0 else extremum - value
+        if excursion < GRIPPER_MIN_EXCURSION:
+            continue
+        command = 1 - command
+        labels[extremum_frame:] = command
+        events.append(
+            {
+                "frame": extremum_frame,
+                "confirmed_frame": frame,
+                "command": command,
+                "opening_before": extremum,
+                "opening_at_confirmation": value,
+            }
+        )
+        extremum, extremum_frame = value, frame
+    return labels, events
+
+
+def binarize_gripper_actions(actions: np.ndarray) -> np.ndarray:
+    """Copy complete selected episode actions and replace the gripper with event labels."""
+    actions = np.array(actions, dtype=np.float32, copy=True)
+    if actions.ndim != 2 or actions.shape[1] != ACTION_DIM or len(actions) == 0:
+        raise ValueError(f"Expected nonempty selected actions [T, 8], got {actions.shape}")
+    actions[:, -1] = detect_gripper_events(actions[:, -1])[0]
+    return actions
+
+
+@functools.lru_cache(maxsize=4096)
+def _episode_gripper_labels(repo_id: str, episode: int) -> np.ndarray:
+    """Read numeric actions once per episode/worker; retain only byte-sized labels."""
+    import pyarrow.parquet as pq
+
+    root = pathlib.Path(repo_id)
+    info = json.loads((root / "meta/info.json").read_text())
+    path = root / info["data_path"].format(episode_index=episode, episode_chunk=episode // info["chunks_size"])
+    table = pq.read_table(path, columns=["action"], use_threads=False)
+    actions = np.asarray(table["action"].to_pylist(), dtype=np.float32)
+    column = right_indices(info["features"], "action")[-1]
+    labels = detect_gripper_events(actions[:, column])[0]
+    labels.flags.writeable = False
+    return labels
 
 
 def right_indices(features: dict, key: str) -> tuple[int, ...]:
@@ -124,10 +235,72 @@ class LingdongRightArmInputs:
         }
         if "action" in data:
             result["actions"] = _right(data["action"], self.action_indices, sequence=True)
+            for key in ("dataset_index", "episode_index", "frame_index"):
+                if key in data:
+                    result[key] = data[key]
         if "prompt" in data:
             prompt = np.asarray(data["prompt"]).item()
             result["prompt"] = prompt.decode("utf-8") if isinstance(prompt, bytes) else str(prompt)
         return result
+
+
+@dataclasses.dataclass(frozen=True)
+class LingdongTrainingActions:
+    """Slice cached whole-episode event labels using the sample's original frame index."""
+
+    action_horizon: int | None = None
+    repo_ids: tuple[str, ...] = ()
+
+    def __call__(self, data: dict) -> dict:
+        if not self.repo_ids:
+            if self.action_horizon is not None:
+                raise ValueError("Chunked Lingdong training requires whole-episode label sources")
+            return {**data, "actions": binarize_gripper_actions(data["actions"])}
+        if "episode_index" not in data or "frame_index" not in data:
+            raise ValueError("Lingdong event labels require episode_index and frame_index")
+        dataset = int(np.asarray(data.get("dataset_index", 0)).item())
+        if not 0 <= dataset < len(self.repo_ids):
+            raise ValueError(f"Invalid Lingdong dataset_index: {dataset}")
+        episode = int(np.asarray(data["episode_index"]).item())
+        frame = int(np.asarray(data["frame_index"]).item())
+        labels = _episode_gripper_labels(self.repo_ids[dataset], episode)
+        if not 0 <= frame < len(labels):
+            raise ValueError(f"Invalid Lingdong episode frame: {episode=}, {frame=}")
+        actions = np.array(data["actions"], dtype=np.float32, copy=True)
+        if self.action_horizon is not None and len(actions) != self.action_horizon:
+            raise ValueError("Lingdong action chunk differs from the model horizon")
+        indices = np.minimum(frame + np.arange(len(actions)), len(labels) - 1)
+        actions[:, -1] = labels[indices]
+        result = {**data, "actions": actions}
+        for key in ("dataset_index", "episode_index", "frame_index"):
+            result.pop(key, None)
+        return result
+
+
+@dataclasses.dataclass(frozen=True)
+class LingdongPromptAugmentation:
+    """Sample generic and validated episode-specific instructions before tokenization."""
+
+    scene_prompts: tuple[dict[int, dict], ...] = ()
+
+    def __call__(self, data: dict) -> dict:
+        if "actions" not in data or "prompt" not in data:
+            return data
+        key = data["prompt"].strip().lower().rstrip(".!?")
+        if (variants := PROMPT_VARIANTS.get(key)) is None:
+            return data
+        if self.scene_prompts:
+            if "episode_index" not in data:
+                raise ValueError("Scene language augmentation requires the original episode_index")
+            dataset = int(np.asarray(data.get("dataset_index", 0)).item())
+            episode = int(np.asarray(data["episode_index"]).item())
+            if not 0 <= dataset < len(self.scene_prompts):
+                raise ValueError("Invalid dataset_index for scene language augmentation")
+            record = self.scene_prompts[dataset][episode]
+            if record["canonical_prompt"] != key:
+                raise ValueError("Scene language task differs from the sampled episode task")
+            variants = (*variants, *record["scene_variants"])
+        return {**data, "prompt": variants[np.random.randint(len(variants))]}
 
 
 @dataclasses.dataclass(frozen=True)

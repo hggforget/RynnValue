@@ -39,11 +39,12 @@ def dataset_manifest(dataset_root: Path) -> tuple[dict, list[tuple]]:
             path = root / info["data_path"].format(episode_index=index, episode_chunk=index // info["chunks_size"])
             jobs.append((path, episode["length"], state_ids, action_ids))
     value = {
-        "version": 1,
+        "version": 2,
         "sources": sources,
         "channel_names": policy.RIGHT_NAMES,
         "state_indices": state_ids,
         "action_indices": action_ids,
+        "action_gripper": policy.gripper_binarization_spec(),
         "statistics": "Each retained frame contributes once; exact pooled 1% and 99% quantiles.",
     }
     value["signature"] = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -53,7 +54,7 @@ def dataset_manifest(dataset_root: Path) -> tuple[dict, list[tuple]]:
 def validate(output: Path, manifest: dict) -> None:
     saved = json.loads((output / "norm_stats_manifest.json").read_text())
     if saved["signature"] != manifest["signature"]:
-        raise ValueError("Normalization sources changed; recompute Lingdong norms")
+        raise ValueError("Normalization sources or action preprocessing changed; recompute Lingdong norms")
     stats = normalize.load(output)
     for key in ("state", "actions"):
         for name in ("mean", "std", "q01", "q99"):
@@ -77,6 +78,8 @@ def read_episode(job):
         values = values[:, ids]
         if not np.isfinite(values).all():
             raise ValueError(f"Nonfinite right-arm channels: {path}")
+        if target == "actions":
+            values = policy.binarize_gripper_actions(values)
         result[target] = values
     return result
 

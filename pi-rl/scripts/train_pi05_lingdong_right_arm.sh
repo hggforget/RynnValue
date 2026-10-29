@@ -80,8 +80,9 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
 fi
 
 # Match reference SFT preflight: compute norms on CPU unless SKIP_NORM=1.
-# Every retained frame contributes once; no videos are decoded. Even when
-# skipping, require finite 8-D stats with the exact current source fingerprint.
+# Every retained frame contributes once, after detecting whole-episode gripper
+# events (0.05 excursion; hold commands through plateaus); no videos are decoded. Even when skipping,
+# require finite 8-D stats with the current source and preprocessing fingerprint.
 if [[ "${SKIP_NORM:-0}" != "1" ]]; then
     JAX_PLATFORMS=cpu XLA_PYTHON_CLIENT_PREALLOCATE=false \
         "$PYTHON" scripts/compute_lingdong_norm_stats.py --dataset-root "$DATA_ROOT"

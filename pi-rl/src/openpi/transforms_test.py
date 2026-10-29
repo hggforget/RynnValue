@@ -86,6 +86,59 @@ def test_tokenize_no_prompt():
         transform({})
 
 
+@pytest.mark.parametrize(
+    ("probability", "draw", "dropped"),
+    [(0.0, None, False), (1.0, None, True), (0.2, 0.1, True), (0.2, 0.8, False)],
+)
+def test_state_input_dropout_omits_tokens_and_preserves_state_and_labels(monkeypatch, probability, draw, dropped):
+    def sample():
+        assert draw is not None, "Boundary probabilities should not consume randomness"
+        return draw
+
+    monkeypatch.setattr(np.random, "random", sample)
+    encoded_text = []
+
+    class Encoder:
+        def encode(self, text, **kwargs):
+            encoded_text.append(text)
+            return [1, 2]
+
+    # Exercise the real prompt formatting without downloading tokenizer assets.
+    tokenizer = object.__new__(_tokenizer.PaligemmaTokenizer)
+    tokenizer._max_len = 32  # noqa: SLF001
+    tokenizer._tokenizer = Encoder()  # noqa: SLF001
+    state = np.arange(8, dtype=np.float32) / 10
+    actions = np.ones((30, 8), dtype=np.float32)
+    image = {"base_0_rgb": np.zeros((8, 12, 3), dtype=np.uint8)}
+    data = {"prompt": "pick up the object", "state": state, "actions": actions, "image": image}
+    transform = _transforms.compose(
+        [_transforms.StateInputDropout(probability), _transforms.TokenizePrompt(tokenizer, discrete_state_input=True)]
+    )
+    result = transform(data)
+    assert ("State:" not in "".join(encoded_text)) == dropped
+    assert "pick up the object" in "".join(encoded_text)
+    assert "_drop_state_input" not in result
+    assert result["state"] is state
+    assert result["actions"] is actions
+    assert result["image"] is image
+    assert "_drop_state_input" not in data
+    assert data["prompt"] == "pick up the object"
+
+
+def test_state_input_dropout_resamples_for_each_sample(monkeypatch):
+    draws = iter([0.1, 0.8])
+    monkeypatch.setattr(np.random, "random", lambda: next(draws))
+    transform = _transforms.StateInputDropout(0.2)
+    assert transform({})["_drop_state_input"]
+    assert not transform({})["_drop_state_input"]
+
+
+@pytest.mark.parametrize("probability", [-0.1, 1.1, float("nan"), float("inf")])
+def test_state_input_dropout_rejects_invalid_probabilities(probability):
+    with pytest.raises(ValueError, match="probability"):
+        _transforms.StateInputDropout(probability)
+
+
 def test_transform_dict():
     # Rename and remove keys.
     input = {"a": {"b": 1, "c": 2}}
