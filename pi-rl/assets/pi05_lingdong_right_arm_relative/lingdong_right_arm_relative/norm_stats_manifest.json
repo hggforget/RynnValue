@@ -3,13 +3,13 @@
   "sources": [
     {
       "repo_id": "/oss/embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final",
-      "episodes": 2810,
-      "frames": 854106,
+      "episodes": 2789,
+      "frames": 847173,
       "metadata_sha256": {
-        "info.json": "63939f5f063f3145ec6430032ff73353097e4ec9ddee17134cb599937fc692e4",
-        "episodes.jsonl": "fff26576e37057cfec574522cce349394a5208f2f7cd55d78ad19ed305c299e2",
+        "info.json": "12a6013ba48ffd2c77b5181b0d577d90dda51bc10f84b5637d628f20141312b1",
+        "episodes.jsonl": "338faa80b55cb288045d25398a096422760a1255064f027a9fe3f66a2ef8d6c9",
         "tasks.jsonl": "914783bda7bbc4a2382489deee1e1dd054dfd903cebe3c257b704ff1375adbee",
-        "file_checksums.json": "f5d71b67a4bc628b41cc0ac2636ad7a535222e759ae2e810482e0c3ce0b5f637"
+        "file_checksums.json": "7165d409bd0dab8caf65671ff008f92d3153774562dfa813b2fad6bb4883e88d"
       }
     }
   ],
@@ -67,5 +67,5 @@
   ],
   "action_horizon": 30,
   "terminal_padding": "repeat_last_action_within_episode",
-  "signature": "206418803c779a9ef0f44070b1ad3aae6543af0bf69ece23b921f20706b189ad"
+  "signature": "5fc8a02adc9b5309342842953cea7029912cbb2992ec067d9fdfa1cb0fc5c213"
 }
