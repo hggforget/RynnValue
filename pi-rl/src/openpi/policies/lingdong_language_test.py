@@ -151,7 +151,8 @@ def test_dataset_fingerprint_and_episode_tasks_are_required_when_loading_assets(
         language.load_scene_prompts(path, (str(root),))
 
 
-def test_training_factory_automatically_loads_validated_episode_scenes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("config_name", [policy.CONFIG_NAME, policy.RELATIVE_CONFIG_NAME])
+def test_training_factory_automatically_loads_validated_episode_scenes(tmp_path, monkeypatch, config_name):
     from openpi import transforms
     from openpi.training import config
 
@@ -182,12 +183,13 @@ def test_training_factory_automatically_loads_validated_episode_scenes(tmp_path,
         "dataset_signature": language.dataset_signature(repo),
         "episodes": {"0": record},
     }
-    path = tmp_path / "assets" / policy.ASSET_ID / language.ASSET_NAME
+    assets_root = tmp_path / "assets"
+    path = assets_root / policy.CONFIG_NAME / policy.ASSET_ID / language.ASSET_NAME
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(asset))
-    preset = config.get_config(policy.CONFIG_NAME)
+    preset = config.get_config(config_name)
     factory = dataclasses.replace(preset.data, dataset_root=str(tmp_path / "datasets"))
-    data = factory.create(tmp_path / "assets", preset.model)
+    data = factory.create(assets_root / config_name, preset.model)
     augmentation = next(t for t in data.training_transforms.inputs if isinstance(t, policy.LingdongPromptAugmentation))
     assert augmentation.scene_prompts[0][0] == record
     assert isinstance(data.training_transforms.inputs[0], policy.LingdongPromptAugmentation)

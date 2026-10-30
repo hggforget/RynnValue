@@ -835,6 +835,9 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
 
     dataset_root: str = lingdong_policy.DEFAULT_DATASET_ROOT
     dataset_names: tuple[str, ...] = lingdong_policy.DATASET_NAMES
+    # Each joint target in a relative chunk is referenced to the current measured state.
+    # The binary gripper command remains absolute.
+    action_representation: Literal["absolute", "relative"] = "absolute"
     augment_prompts: bool = True
     # Defaults to the validated episode-scene asset next to normalization statistics.
     scene_prompts_path: str | None = None
@@ -843,6 +846,8 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
+        if self.action_representation not in ("absolute", "relative"):
+            raise ValueError("Lingdong action_representation must be absolute or relative")
         state_dropout = _transforms.StateInputDropout(self.state_dropout_prob)
         if self.state_dropout_prob > 0 and (
             model_config.model_type != _model.ModelType.PI05 or not model_config.discrete_state_input
@@ -857,6 +862,14 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
                 / (self.assets.asset_id or self.repo_id or lingdong_policy.ASSET_ID)
                 / lingdong_language.ASSET_NAME
             )
+            if not self.scene_prompts_path and not scene_path.is_file() and self.action_representation == "relative":
+                # Scene descriptions are shared across action representations; norm stats are separate.
+                scene_path = (
+                    pathlib.Path(assets_dirs).parent
+                    / lingdong_policy.CONFIG_NAME
+                    / lingdong_policy.ASSET_ID
+                    / lingdong_language.ASSET_NAME
+                )
             if self.scene_prompts_path and not scene_path.is_file():
                 raise FileNotFoundError(f"Scene language asset is unavailable: {scene_path}")
             scene_prompts = ()
@@ -866,12 +879,18 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
         training_transforms.append(lingdong_policy.LingdongTrainingActions(model_config.action_horizon, repo_ids))
         if self.state_dropout_prob > 0:
             training_transforms.append(state_dropout)
+        data_transforms = _transforms.Group(
+            inputs=[lingdong_policy.LingdongRightArmInputs(state_indices, action_indices)],
+            outputs=[lingdong_policy.LingdongRightArmOutputs()],
+        )
+        if self.action_representation == "relative":
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(lingdong_policy.RELATIVE_ACTION_MASK)],
+                outputs=[_transforms.AbsoluteActions(lingdong_policy.RELATIVE_ACTION_MASK)],
+            )
         return dataclasses.replace(
             self.create_base_multi_config(assets_dirs, model_config, repo_ids),
-            data_transforms=_transforms.Group(
-                inputs=[lingdong_policy.LingdongRightArmInputs(state_indices, action_indices)],
-                outputs=[lingdong_policy.LingdongRightArmOutputs()],
-            ),
+            data_transforms=data_transforms,
             training_transforms=_transforms.Group(inputs=training_transforms),
             model_transforms=ModelTransformFactory()(model_config),
             action_sequence_keys=("action",),
@@ -4198,6 +4217,29 @@ _CONFIGS = [
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
+]
+
+# Lingdong relative targets use the same observations, labels and SFT hyperparameters.
+_CONFIGS += [
+    dataclasses.replace(
+        config,
+        name=lingdong_policy.RELATIVE_CONFIG_NAME,
+        data=dataclasses.replace(
+            config.data,
+            repo_id=lingdong_policy.RELATIVE_ASSET_ID,
+            action_representation="relative",
+            assets=dataclasses.replace(config.data.assets, asset_id=lingdong_policy.RELATIVE_ASSET_ID),
+        ),
+        policy_metadata={
+            **config.policy_metadata,
+            "action_representation": "relative_joint_targets",
+            "action_reference": "current_observation_state",
+            "relative_action_mask": lingdong_policy.RELATIVE_ACTION_MASK,
+            "output_action_representation": "recorded_joint_targets",
+        },
+    )
+    for config in _CONFIGS
+    if config.name == lingdong_policy.CONFIG_NAME
 ]
 
 # Keep training hyperparameters identical across action representations. Relative

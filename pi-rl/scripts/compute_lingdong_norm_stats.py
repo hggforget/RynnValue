@@ -1,4 +1,4 @@
-"""Exact frame-weighted 8-D Lingdong normalization from Parquet; no video decoding."""
+"""Exact 8-D Lingdong normalization for absolute/relative targets; no video decoding."""
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -14,9 +14,16 @@ from openpi.policies import lingdong_policy as policy
 from openpi.shared import normalize
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "assets" / policy.CONFIG_NAME / policy.ASSET_ID
+RELATIVE_OUTPUT = DEFAULT_OUTPUT.parents[1] / policy.RELATIVE_CONFIG_NAME / policy.RELATIVE_ASSET_ID
 
 
-def dataset_manifest(dataset_root: Path) -> tuple[dict, list[tuple]]:
+def dataset_manifest(
+    dataset_root: Path, *, action_representation: str = "absolute", action_horizon: int = 30
+) -> tuple[dict, list[tuple]]:
+    if action_representation not in ("absolute", "relative"):
+        raise ValueError("action_representation must be absolute or relative")
+    if action_horizon < 1:
+        raise ValueError("action_horizon must be positive")
     repos = tuple(str((dataset_root / name).resolve()) for name in policy.DATASET_NAMES)
     state_ids, action_ids = policy.dataset_indices(repos)
     sources, jobs = [], []
@@ -47,6 +54,19 @@ def dataset_manifest(dataset_root: Path) -> tuple[dict, list[tuple]]:
         "action_gripper": policy.gripper_binarization_spec(),
         "statistics": "Each retained frame contributes once; exact pooled 1% and 99% quantiles.",
     }
+    if action_representation == "relative":
+        value.update(
+            version=3,
+            action_representation="relative_joint_targets",
+            action_reference="current_observation_state",
+            relative_action_mask=policy.RELATIVE_ACTION_MASK,
+            action_horizon=action_horizon,
+            terminal_padding="repeat_last_action_within_episode",
+            statistics=(
+                "Each retained frame contributes one state and one complete action chunk; "
+                "exact pooled 1% and 99% quantiles over all chunk positions."
+            ),
+        )
     value["signature"] = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     return value, jobs
 
@@ -65,7 +85,7 @@ def validate(output: Path, manifest: dict) -> None:
             raise ValueError(f"Invalid normalization ranges: {key}")
 
 
-def read_episode(job):
+def read_episode(job, *, action_representation: str = "absolute", action_horizon: int = 30):
     path, length, state_ids, action_ids = job
     table = pq.read_table(path, columns=["observation.state", "action"], use_threads=False)
     if len(table) != length:
@@ -81,18 +101,38 @@ def read_episode(job):
         if target == "actions":
             values = policy.binarize_gripper_actions(values)
         result[target] = values
+    if action_representation == "relative":
+        # Training samples every frame as a chunk start, repeating the final target
+        # at episode boundaries. Every offset uses the start frame's measured state.
+        indices = np.minimum(np.arange(length)[:, None] + np.arange(action_horizon), length - 1)
+        chunks = result["actions"][indices]
+        chunks[..., :7] -= result["state"][:, None, :7]
+        result["actions"] = chunks.reshape(-1, policy.ACTION_DIM)
     return result
 
 
-def compute(dataset_root: Path, output: Path, workers: int = 16, *, check: bool = False):
-    manifest, jobs = dataset_manifest(dataset_root)
+def compute(
+    dataset_root: Path,
+    output: Path,
+    workers: int = 16,
+    *,
+    check: bool = False,
+    action_representation: str = "absolute",
+    action_horizon: int = 30,
+):
+    manifest, jobs = dataset_manifest(
+        dataset_root, action_representation=action_representation, action_horizon=action_horizon
+    )
     if check:
         validate(output, manifest)
         print(f"Valid 8-D Lingdong norms: {output}")
         return
     values = {"state": [], "actions": []}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(read_episode, job) for job in jobs]
+        futures = [
+            pool.submit(read_episode, job, action_representation=action_representation, action_horizon=action_horizon)
+            for job in jobs
+        ]
         for n, future in enumerate(as_completed(futures), 1):
             result = future.result()
             for key, batches in values.items():
@@ -102,7 +142,9 @@ def compute(dataset_root: Path, output: Path, workers: int = 16, *, check: bool 
     stats = {}
     for key, batches in values.items():
         array = np.concatenate(batches)
-        if len(array) != sum(source["frames"] for source in manifest["sources"]):
+        frames = sum(source["frames"] for source in manifest["sources"])
+        count = frames * action_horizon if key == "actions" and action_representation == "relative" else frames
+        if len(array) != count:
             raise ValueError("Normalization did not cover all retained frames")
         q01, q99 = np.quantile(array, [0.01, 0.99], axis=0)
         stats[key] = normalize.NormStats(
@@ -122,6 +164,7 @@ def compute(dataset_root: Path, output: Path, workers: int = 16, *, check: bool 
                 "frames": sum(s["frames"] for s in manifest["sources"]),
                 "state_dim": 8,
                 "action_dim": 8,
+                "action_representation": action_representation,
             }
         )
     )
@@ -130,10 +173,22 @@ def compute(dataset_root: Path, output: Path, workers: int = 16, *, check: bool 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", type=Path, default=Path(policy.DEFAULT_DATASET_ROOT))
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--action-representation", choices=("absolute", "relative"), default="absolute")
+    parser.add_argument("--action-horizon", type=int, default=30)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.workers <= 64:
         parser.error("workers must be 1..64")
-    compute(args.dataset_root, args.output, args.workers, check=args.check)
+    if args.action_horizon < 1:
+        parser.error("action-horizon must be positive")
+    output = args.output or (RELATIVE_OUTPUT if args.action_representation == "relative" else DEFAULT_OUTPUT)
+    compute(
+        args.dataset_root,
+        output,
+        args.workers,
+        check=args.check,
+        action_representation=args.action_representation,
+        action_horizon=args.action_horizon,
+    )

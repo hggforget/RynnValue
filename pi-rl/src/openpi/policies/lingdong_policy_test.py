@@ -190,13 +190,14 @@ def test_dataset_loading_waits_for_dataset_updates_to_finish(tmp_path, journal, 
     )
 
 
-def test_config_reads_final_dataset_and_keeps_both_tasks_and_two_cameras(tmp_path, monkeypatch):
+@pytest.mark.parametrize("config_name", [policy.CONFIG_NAME, policy.RELATIVE_CONFIG_NAME])
+def test_config_reads_final_dataset_and_keeps_both_tasks_and_two_cameras(tmp_path, monkeypatch, config_name):
     monkeypatch.setattr(config.ModelTransformFactory, "__call__", lambda self, model: transforms.Group())
     for name in policy.DATASET_NAMES:
         meta = tmp_path / name / "meta"
         meta.mkdir(parents=True)
         (meta / "info.json").write_text(json.dumps(metadata()))
-    preset = config.get_config(policy.CONFIG_NAME)
+    preset = config.get_config(config_name)
     factory = dataclasses.replace(preset.data, dataset_root=str(tmp_path))
     data = factory.create(tmp_path / "assets", preset.model)
     assert isinstance(data, config.MultiDataConfig)
@@ -225,6 +226,48 @@ def test_config_reads_final_dataset_and_keeps_both_tasks_and_two_cameras(tmp_pat
         prompts({"dataset_index": 0, "task_index": 0})["prompt"]
         != prompts({"dataset_index": 0, "task_index": 1})["prompt"]
     )
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_relative_chunks_use_current_state_and_serving_restores_absolute_targets(tmp_path, monkeypatch, selected):
+    monkeypatch.setattr(config.ModelTransformFactory, "__call__", lambda self, model: transforms.Group())
+    monkeypatch.setattr(policy, "_episode_gripper_labels", lambda repo, episode: np.ones(30, dtype=np.uint8))
+    preset = config.get_config(policy.RELATIVE_CONFIG_NAME)
+    absolute = config.get_config(policy.CONFIG_NAME)
+    assert preset.model == absolute.model
+    assert preset.lr_schedule == absolute.lr_schedule
+    assert preset.num_train_steps == absolute.num_train_steps
+    assert preset.data.assets.asset_id == policy.RELATIVE_ASSET_ID
+    assert preset.assets_dirs != absolute.assets_dirs
+    factory = dataclasses.replace(preset.data, dataset_root=str(tmp_path), augment_prompts=False, state_dropout_prob=1)
+    data = factory.create(tmp_path / "assets", preset.model)
+    assert data.asset_id == policy.RELATIVE_ASSET_ID
+    raw = raw_sample()
+    raw["action"][:, list(policy.RIGHT_INDICES[:7])] += np.arange(30, dtype=np.float32)[:, None] / 10 + 0.25
+    if selected:
+        raw["action"] = raw["action"][:, list(policy.RIGHT_INDICES)]
+    original = raw["action"].copy()
+    raw.update(dataset_index=0, episode_index=0, frame_index=0)
+    result = data_loader.transform_dataset([raw], data, skip_norm_stats=True)[0]
+    targets = original if selected else original[:, list(policy.RIGHT_INDICES)]
+    state = raw["observation.state"][list(policy.RIGHT_INDICES)]
+    np.testing.assert_allclose(result["actions"][:, :7], targets[:, :7] - state[:7], atol=1e-7)
+    np.testing.assert_array_equal(result["actions"][:, -1], 1)
+    np.testing.assert_array_equal(result["state"], state)
+    np.testing.assert_array_equal(raw["action"], original)
+    assert result["_drop_state_input"]
+
+    # Simulate policy output after unnormalizing padded model state/actions.
+    output = transforms.compose(data.data_transforms.outputs)(
+        {"actions": np.pad(result["actions"], ((0, 0), (0, 24))), "state": np.pad(state, (0, 24))}
+    )
+    assert output["actions"].shape == (30, 8)
+    np.testing.assert_allclose(output["actions"][:, :7], targets[:, :7], atol=1e-7)
+    np.testing.assert_array_equal(output["actions"][:, -1], 1)
+    serving = transforms.compose(data.data_transforms.inputs)(
+        {key: value for key, value in raw_sample().items() if key != "action"}
+    )
+    np.testing.assert_array_equal(serving["state"], state)
 
 
 def test_state_dropout_omits_training_tokens_but_keeps_serving_state(tmp_path, monkeypatch):

@@ -92,3 +92,53 @@ def test_pre_binary_norm_manifest_is_rejected(dataset, tmp_path):
     (output / "norm_stats_manifest.json").write_text(json.dumps(old))
     with pytest.raises(ValueError, match="preprocessing changed"):
         norms.compute(root, output, check=True)
+
+
+@pytest.mark.parametrize("horizon", [1, 5, 30])
+def test_relative_norms_match_every_training_chunk_and_terminal_padding(dataset, tmp_path, horizon):
+    root, state, action = dataset
+    output = tmp_path / "relative_assets"
+    kwargs = {"action_representation": "relative", "action_horizon": horizon}
+    norms.compute(root, output, workers=1, **kwargs)
+    norms.compute(root, output, check=True, **kwargs)
+    saved = normalize.load(output)
+    selected_state = state[:, list(policy.RIGHT_INDICES)]
+    selected_action = action[:, list(policy.RIGHT_INDICES)]
+    training = policy.LingdongTrainingActions(action_horizon=horizon, repo_ids=(str(root / policy.DATASET_NAMES[0]),))
+    from openpi import transforms
+
+    chunks = []
+    for start in range(len(state)):
+        indices = np.minimum(start + np.arange(horizon), len(state) - 1)
+        chunk = training(
+            transforms.DeltaActions(policy.RELATIVE_ACTION_MASK)(
+                {
+                    "state": selected_state[start],
+                    "actions": selected_action[indices].copy(),
+                    "episode_index": 0,
+                    "frame_index": start,
+                }
+            )
+        )
+        chunks.append(chunk["actions"])
+    expected_actions = np.concatenate(chunks)
+    for key, expected in (("state", selected_state), ("actions", expected_actions)):
+        np.testing.assert_allclose(saved[key].mean, np.mean(expected, axis=0, dtype=np.float64))
+        np.testing.assert_allclose(saved[key].std, np.std(expected, axis=0, dtype=np.float64))
+        np.testing.assert_allclose(saved[key].q01, np.quantile(expected, 0.01, axis=0))
+        np.testing.assert_allclose(saved[key].q99, np.quantile(expected, 0.99, axis=0))
+    manifest = json.loads((output / "norm_stats_manifest.json").read_text())
+    assert manifest["action_horizon"] == horizon
+    assert manifest["action_reference"] == "current_observation_state"
+    with pytest.raises(ValueError, match="preprocessing changed"):
+        norms.compute(root, output, check=True)  # Absolute stats cannot reuse relative assets.
+    with pytest.raises(ValueError, match="preprocessing changed"):
+        norms.compute(root, output, check=True, action_representation="relative", action_horizon=horizon + 1)
+
+
+def test_relative_check_rejects_absolute_assets(dataset, tmp_path):
+    root, _, _ = dataset
+    output = tmp_path / "absolute_assets"
+    norms.compute(root, output, workers=1)
+    with pytest.raises(ValueError, match="preprocessing changed"):
+        norms.compute(root, output, check=True, action_representation="relative")

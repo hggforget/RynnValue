@@ -8,7 +8,8 @@ export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 DEFAULT_PYTHON=/opt/conda/envs/pku-pi-rl/bin/python
 [[ -x "$DEFAULT_PYTHON" ]] || DEFAULT_PYTHON=python3
 PYTHON="${PYTHON:-$DEFAULT_PYTHON}"
-CONFIG=pi05_lingdong_right_arm
+ACTION_REPRESENTATION="${ACTION_REPRESENTATION:-absolute}"
+ACTION_HORIZON="${ACTION_HORIZON:-30}"
 
 # Read data and base weights directly from OSS unless explicitly overridden.
 DATA_ROOT="${DATA_ROOT:-/oss/embodied-ai-data/lingdong}"
@@ -16,7 +17,6 @@ WEIGHT_PARAMS_PATH="${WEIGHT_PARAMS_PATH:-/oss/embodied-ai-data/pku/pi05_base/pa
 if [[ -n "${INIT_CHECKPOINT:-}" ]]; then
     WEIGHT_PARAMS_PATH="${INIT_CHECKPOINT%/}/params"
 fi
-EXP_NAME="${EXP_NAME:-lingdong_right_arm_$(date +%m%d_%H%M%S)}"
 CKPT_BASE_DIR="${CKPT_BASE_DIR:-../output/checkpoints}"
 # Match train_sft_pku_franka_collect_objects.sh: use every visible physical GPU
 # unless the caller supplies GPUS; shard the model across the selected devices.
@@ -37,14 +37,30 @@ if [[ ! "$BATCH_SIZE_PER_GPU" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 BATCH_SIZE="${BATCH_SIZE:-$((BATCH_SIZE_PER_GPU * ${#GPU_LIST[@]}))}"
-# Keep the CLI's global-batch override visible in the launch summary as well.
+# Keep CLI overrides in sync with normalization and the launch summary.
 CLI_ARGS=("$@")
 for ((i=0; i<${#CLI_ARGS[@]}; i++)); do
     case "${CLI_ARGS[i]}" in
         --batch-size) BATCH_SIZE="${CLI_ARGS[i+1]:-}" ;;
         --batch-size=*) BATCH_SIZE="${CLI_ARGS[i]#*=}" ;;
+        --data.action-representation) ACTION_REPRESENTATION="${CLI_ARGS[i+1]:-}" ;;
+        --data.action-representation=*) ACTION_REPRESENTATION="${CLI_ARGS[i]#*=}" ;;
+        --model.action-horizon) ACTION_HORIZON="${CLI_ARGS[i+1]:-}" ;;
+        --model.action-horizon=*) ACTION_HORIZON="${CLI_ARGS[i]#*=}" ;;
+        --data.dataset-root) DATA_ROOT="${CLI_ARGS[i+1]:-}" ;;
+        --data.dataset-root=*) DATA_ROOT="${CLI_ARGS[i]#*=}" ;;
     esac
 done
+case "$ACTION_REPRESENTATION" in
+    absolute) CONFIG=pi05_lingdong_right_arm; EXP_PREFIX=lingdong_right_arm ;;
+    relative) CONFIG=pi05_lingdong_right_arm_relative; EXP_PREFIX=lingdong_right_arm_relative ;;
+    *) echo "ACTION_REPRESENTATION must be absolute or relative." >&2; exit 1 ;;
+esac
+if [[ ! "$ACTION_HORIZON" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ACTION_HORIZON must be a positive integer." >&2
+    exit 1
+fi
+EXP_NAME="${EXP_NAME:-${EXP_PREFIX}_$(date +%m%d_%H%M%S)}"
 if [[ ! "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || ((BATCH_SIZE % ${#GPU_LIST[@]} != 0)); then
     echo "Global BATCH_SIZE must be positive and divisible by the selected GPU count." >&2
     exit 1
@@ -71,8 +87,9 @@ TRAIN_ARGS=(
     --checkpoint-base-dir "$CKPT_BASE_DIR"
     --fsdp-devices "$FSDP_DEVICES"
     --batch-size "$BATCH_SIZE"
+    --model.action-horizon "$ACTION_HORIZON"
 )
-echo "Starting $CONFIG: data=$DATA_ROOT, weights=$WEIGHT_PARAMS_PATH, checkpoints=$CKPT_BASE_DIR, openpi_cache=$OPENPI_DATA_HOME, GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, batch_per_gpu=$((BATCH_SIZE / ${#GPU_LIST[@]})), experiment=$EXP_NAME"
+echo "Starting $CONFIG: data=$DATA_ROOT, weights=$WEIGHT_PARAMS_PATH, checkpoints=$CKPT_BASE_DIR, openpi_cache=$OPENPI_DATA_HOME, GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, batch_per_gpu=$((BATCH_SIZE / ${#GPU_LIST[@]})), action_representation=$ACTION_REPRESENTATION, action_horizon=$ACTION_HORIZON, experiment=$EXP_NAME"
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '%q ' "$PYTHON" "${TRAIN_ARGS[@]}" "$@"
     printf '\n'
@@ -80,13 +97,18 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
 fi
 
 # Match reference SFT preflight: compute norms on CPU unless SKIP_NORM=1.
-# Every retained frame contributes once, after detecting whole-episode gripper
-# events (0.05 excursion; hold commands through plateaus); no videos are decoded. Even when skipping,
-# require finite 8-D stats with the current source and preprocessing fingerprint.
+# Whole-episode gripper events are shared across modes; relative statistics cover
+# every chunk position with terminal padding. No videos are decoded. Even when
+# skipping, require finite 8-D stats with the current source/preprocessing fingerprint.
+NORM_ARGS=(
+    --dataset-root "$DATA_ROOT"
+    --action-representation "$ACTION_REPRESENTATION"
+    --action-horizon "$ACTION_HORIZON"
+)
 if [[ "${SKIP_NORM:-0}" != "1" ]]; then
     JAX_PLATFORMS=cpu XLA_PYTHON_CLIENT_PREALLOCATE=false \
-        "$PYTHON" scripts/compute_lingdong_norm_stats.py --dataset-root "$DATA_ROOT"
+        "$PYTHON" scripts/compute_lingdong_norm_stats.py "${NORM_ARGS[@]}"
 fi
 JAX_PLATFORMS=cpu XLA_PYTHON_CLIENT_PREALLOCATE=false \
-    "$PYTHON" scripts/compute_lingdong_norm_stats.py --dataset-root "$DATA_ROOT" --check
+    "$PYTHON" scripts/compute_lingdong_norm_stats.py "${NORM_ARGS[@]}" --check
 exec "$PYTHON" "${TRAIN_ARGS[@]}" "$@"

@@ -1,0 +1,71 @@
+{
+  "version": 3,
+  "sources": [
+    {
+      "repo_id": "/oss/embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final",
+      "episodes": 2810,
+      "frames": 854106,
+      "metadata_sha256": {
+        "info.json": "63939f5f063f3145ec6430032ff73353097e4ec9ddee17134cb599937fc692e4",
+        "episodes.jsonl": "fff26576e37057cfec574522cce349394a5208f2f7cd55d78ad19ed305c299e2",
+        "tasks.jsonl": "914783bda7bbc4a2382489deee1e1dd054dfd903cebe3c257b704ff1375adbee",
+        "file_checksums.json": "f5d71b67a4bc628b41cc0ac2636ad7a535222e759ae2e810482e0c3ce0b5f637"
+      }
+    }
+  ],
+  "channel_names": [
+    "abad_R_Joint",
+    "hip_R_Joint",
+    "yaw_R_Joint",
+    "knee_R_Joint",
+    "wrist_yaw_R_Joint",
+    "wrist_pitch_R_Joint",
+    "wrist_roll_R_Joint",
+    "right_gripper"
+  ],
+  "state_indices": [
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    17
+  ],
+  "action_indices": [
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    17
+  ],
+  "action_gripper": {
+    "encoding": "binary_0_closed_1_open",
+    "method": "episode_extrema_hysteresis_v1",
+    "initial_threshold": 0.6,
+    "min_excursion": 0.05,
+    "median_filter_frames": 3,
+    "onset": "last_extremum_before_confirmed_motion",
+    "plateaus_and_terminal": "hold_previous_command"
+  },
+  "statistics": "Each retained frame contributes one state and one complete action chunk; exact pooled 1% and 99% quantiles over all chunk positions.",
+  "action_representation": "relative_joint_targets",
+  "action_reference": "current_observation_state",
+  "relative_action_mask": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+  ],
+  "action_horizon": 30,
+  "terminal_padding": "repeat_last_action_within_episode",
+  "signature": "206418803c779a9ef0f44070b1ad3aae6543af0bf69ece23b921f20706b189ad"
+}

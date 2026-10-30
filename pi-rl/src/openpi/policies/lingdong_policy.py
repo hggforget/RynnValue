@@ -9,6 +9,8 @@ import numpy as np
 
 CONFIG_NAME = "pi05_lingdong_right_arm"
 ASSET_ID = "lingdong_right_arm"
+RELATIVE_CONFIG_NAME = "pi05_lingdong_right_arm_relative"
+RELATIVE_ASSET_ID = "lingdong_right_arm_relative"
 DEFAULT_DATASET_ROOT = "/mnt/rynnbot_hangzhou/hdc/pku/datasets/lingdong"
 DATASET_NAMES = ("lerobot_2026-10-26_12-09-32_final",)
 HEAD_IMAGE_KEY = "observation.images.cam_high"
@@ -26,6 +28,7 @@ RIGHT_NAMES = (
 )
 RIGHT_INDICES = (7, 8, 9, 10, 11, 12, 13, 17)
 ACTION_DIM = STATE_DIM = 8
+RELATIVE_ACTION_MASK = (True,) * 7 + (False,)
 GRIPPER_THRESHOLD = 0.6
 GRIPPER_MIN_EXCURSION = 0.05
 PROMPT_VARIANTS = {
@@ -234,7 +237,8 @@ class LingdongRightArmInputs:
             "image_mask": {"base_0_rgb": np.True_, "right_wrist_0_rgb": np.True_},
         }
         if "action" in data:
-            result["actions"] = _right(data["action"], self.action_indices, sequence=True)
+            # DeltaActions modifies its input in place, including already selected 8-D chunks.
+            result["actions"] = _right(data["action"], self.action_indices, sequence=True).copy()
             for key in ("dataset_index", "episode_index", "frame_index"):
                 if key in data:
                     result[key] = data[key]

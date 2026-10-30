@@ -47,6 +47,11 @@ bash scripts/train_pi05_lingdong_right_arm.sh
 # Single GPU, global batch 16.
 GPUS=0 bash scripts/train_pi05_lingdong_right_arm.sh
 
+# Relative joint targets, with independent normalization assets and experiment names.
+bash scripts/train_pi05_lingdong_right_arm_relative.sh
+# Equivalent switch on the original launcher:
+ACTION_REPRESENTATION=relative bash scripts/train_pi05_lingdong_right_arm.sh
+
 # Omit state tokens for 50% of training samples in a new experiment (the default).
 EXP_NAME=lingdong_state_dropout_50 bash scripts/train_pi05_lingdong_right_arm.sh --data.state-dropout-prob 0.5
 
@@ -73,6 +78,10 @@ Normalization runs on CPU before training, using the selected eight channels of 
 PYTHONPATH=src python scripts/compute_lingdong_norm_stats.py --dataset-root /oss/embodied-ai-data/lingdong
 PYTHONPATH=src python scripts/compute_lingdong_norm_stats.py --dataset-root /oss/embodied-ai-data/lingdong --check
 ```
+
+The `pi05_lingdong_right_arm_relative` preset trains the first seven action channels as `action[t + k, :7] - observation.state[t, :7]` for every offset in the chunk. Gripper actions remain binary absolute commands, and measured state, cameras, prompt augmentation, state dropout and training hyperparameters match the absolute preset. Inference restores absolute joint targets using the observed state before returning the eight physical channels. Load relative checkpoints with `--policy.config pi05_lingdong_right_arm_relative` in `scripts/serve_policy.py` (standard inference).
+
+Relative statistics are stored separately in `assets/pi05_lingdong_right_arm_relative/lingdong_right_arm_relative/`. They pool all action positions from every retained chunk start, repeating the final action within each episode, while state statistics still count each frame once. The manifest fingerprints the relative representation and chunk horizon, so absolute statistics or a different horizon fail validation. The launcher defaults to 30 frames; set `ACTION_HORIZON` or pass `--model.action-horizon` to change both training and normalization together. To compute or validate these assets explicitly, add `--action-representation relative --action-horizon 30` to the normalization command above. Validated scene prompts are reused from the absolute preset unless a relative scene asset or explicit `--data.scene-prompts-path` is supplied.
 
 The data adapter is [lingdong_policy.py](src/openpi/policies/lingdong_policy.py), and the registered factory/preset is in [training/config.py](src/openpi/training/config.py). For serving, `observation.state` may be the raw 18-D vector or an already selected 8-D vector in the order above; provide the two camera fields and a task prompt. The input datasets remain unchanged.
 
