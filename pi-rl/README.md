@@ -17,9 +17,20 @@ Pi0.5 checkpoint serving and the Franka replay/live-observation client connect d
 
 ## Lingdong Tron2 right-arm training
 
-`pi05_lingdong_right_arm` fine-tunes Pi0.5 on the single merged dataset `/oss/embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final`, mounted from `oss://embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final/`. It contains 2,810 startup-trimmed episodes and 854,106 frames, with `task_index=0` for pick-up and `task_index=1` for put-down. Sampling is uniform over all retained frames. Episodes are ordered by their original source index and reindexed from zero.
+`pi05_lingdong_right_arm_crop` fine-tunes Pi0.5 on the single merged dataset `/oss/embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final`, mounted from `oss://embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final/`. It contains 2,810 startup-trimmed episodes and 854,106 frames, with `task_index=0` for pick-up and `task_index=1` for put-down. Sampling is uniform over all retained frames. Episodes are ordered by their original source index and reindexed from zero.
 
 Only `observation.images.cam_high` and the already corrected `observation.images.cam_right_wrist` are decoded, mapped to `base_0_rgb` and `right_wrist_0_rgb`. Both state and action contain these eight recorded channels in order: `abad_R_Joint`, `hip_R_Joint`, `yaw_R_Joint`, `knee_R_Joint`, `wrist_yaw_R_Joint`, `wrist_pitch_R_Joint`, `wrist_roll_R_Joint`, `right_gripper`. Their canonical raw indices are `[7,8,9,10,11,12,13,17]`; the adapter resolves actual indices from metadata names. Joint targets and measured continuous gripper states are preserved. Model padding extends eight physical channels to the pretrained 32-D layout; inference outputs are reduced back to eight channels.
+
+The training launchers default to `pi05_lingdong_right_arm_crop` and `pi05_lingdong_right_arm_relative_crop`. Both crop the original 640×480 head image to `image[160:480, 240:560]` (320×320), then use the normal model resize to 224×224. The right wrist retains full-frame resize with padding. Crop training and serving share the same adapter, which requires the original head resolution and accepts HWC/CHW RGB; clients should send the full head image. Existing image augmentation still runs after resizing. Source videos are preserved, and existing numeric normalization and language assets are shared with the matching action representation. Crop checkpoints use distinct config names and record the crop coordinates in policy metadata. The original `pi05_lingdong_right_arm` and `pi05_lingdong_right_arm_relative` configs retain full-frame preprocessing for earlier checkpoints.
+
+Serve a crop-trained checkpoint with its matching config (use `pi05_lingdong_right_arm_relative_crop` for relative actions):
+
+```bash
+POLICY_CONFIG=pi05_lingdong_right_arm_crop CHECKPOINT=/path/to/crop/checkpoint \
+    bash scripts/serve_pi05_lingdong_right_arm.sh
+```
+
+The serving launcher's default checkpoint is an earlier full-frame model and therefore still defaults to the original full-frame config. The cropped absolute config also supports `INFERENCE_MODE=rtc`.
 
 Binary gripper actions are inferred from complete episode trajectories before normalization. A three-frame median removes isolated interior spikes. An opening/closing event is confirmed when the cumulative change from the previous extremum reaches 0.05, then backdated to the last extremum before motion. Commands remain 1 (open) or 0 (close) through intermediate plateaus, small reverse excursions, and the final hold. The 0.6 threshold initializes only the first state. Each dataset worker reads an episode's numeric actions once and caches its byte-sized labels; 30-frame training chunks index those labels by the original `episode_index` and `frame_index`, repeating the terminal label when padded. Labels therefore agree for overlapping chunks and cannot reset at a chunk boundary. Both normalization and training use the same detector.
 
@@ -36,7 +47,7 @@ PYTHONPATH=src python scripts/run_lingdong_scene_workers.py --batch-size 8
 PYTHONPATH=src python scripts/export_lingdong_scene_prompts.py
 ```
 
-The entire state token segment is omitted independently for 50% of training samples by default (`--data.state-dropout-prob 0.5`). Images, task instructions, measured state arrays and action labels are preserved; the omitted state is not replaced by zeros. This probability accepts values from 0 to 1; pass `--data.state-dropout-prob 0` to disable dropout. Nonzero dropout requires `discrete_state_input=True`. Dropout runs only in dataset preprocessing; standard and RTC serving continue to include state normally. Use `--model.no-discrete-state-input --data.state-dropout-prob 0` instead for an experiment that excludes state tokens during both training and serving, and use the same model setting when loading that checkpoint.
+State dropout is disabled by default (`--data.state-dropout-prob 0`), so every training sample retains its state token segment. This applies to absolute/relative actions and both full-frame/crop presets. To enable an explicit dropout experiment, set a probability from 0 to 1; the selected samples omit the entire state token segment without replacing it with zeros. Images, task instructions, measured state arrays and action labels are preserved. Nonzero dropout requires `discrete_state_input=True`. Dropout runs only in dataset preprocessing; standard and RTC serving continue to include state normally. Use `--model.no-discrete-state-input --data.state-dropout-prob 0` for an experiment that excludes state tokens during both training and serving, and use the same model setting when loading that checkpoint.
 
 The 2026-10-28 camera audit found different wrist mappings across recording blocks. In the trimmed source datasets, pick-up episodes 108–1484 and put-down episodes 0–101 required exchanging the wrist videos; the other source episodes were already correct. The merged dataset preserves this per-episode correction: 1,479 episodes corrected and 1,331 preserved. These source indices differ from the merged episode indices; `meta/episode_mapping.jsonl` records each mapping. Encoded video bytes, numeric state/action data and head videos are preserved. The training adapter reads the final named right camera for both tasks without another swap. Dataset loading rejects unfinished merge/correction journals.
 
@@ -52,7 +63,7 @@ bash scripts/train_pi05_lingdong_right_arm_relative.sh
 # Equivalent switch on the original launcher:
 ACTION_REPRESENTATION=relative bash scripts/train_pi05_lingdong_right_arm.sh
 
-# Omit state tokens for 50% of training samples in a new experiment (the default).
+# Optional experiment: explicitly enable 50% state dropout (disabled by default).
 EXP_NAME=lingdong_state_dropout_50 bash scripts/train_pi05_lingdong_right_arm.sh --data.state-dropout-prob 0.5
 
 # Inspect resolved GPUs, global batch, dataset/weight paths and command without training.

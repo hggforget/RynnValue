@@ -66,6 +66,64 @@ def test_inference_accepts_selected_state_without_left_arm_or_action():
     assert result["state"].shape == (8,)
 
 
+@pytest.mark.parametrize("chw_float", [False, True])
+@pytest.mark.parametrize("training", [False, True])
+def test_fixed_head_crop_matches_preview_for_training_and_serving(chw_float, training):
+    raw = raw_sample()
+    head = np.random.default_rng(0).integers(0, 256, (480, 640, 3), dtype=np.uint8)
+    raw[policy.HEAD_IMAGE_KEY] = np.moveaxis(head.astype(np.float32) / 255, -1, 0) if chw_float else head
+    if not training:
+        del raw["action"]
+    original = raw[policy.HEAD_IMAGE_KEY].copy()
+    legacy = policy.LingdongRightArmInputs()(raw)
+    cropped = policy.LingdongRightArmInputs(crop_head=True)(raw)
+    assert cropped["image"]["base_0_rgb"].shape == (320, 320, 3)
+    np.testing.assert_array_equal(cropped["image"]["base_0_rgb"], head[160:480, 240:560])
+    np.testing.assert_array_equal(cropped["image"]["right_wrist_0_rgb"], legacy["image"]["right_wrist_0_rgb"])
+    np.testing.assert_array_equal(cropped["state"], legacy["state"])
+    np.testing.assert_array_equal(raw[policy.HEAD_IMAGE_KEY], original)
+    if training:
+        np.testing.assert_array_equal(cropped["actions"], legacy["actions"])
+    else:
+        assert "actions" not in cropped
+
+
+@pytest.mark.parametrize("shape", [(224, 224, 3), (320, 320, 3), (720, 1280, 3)])
+def test_head_crop_requires_full_resolution_input(shape):
+    raw = raw_sample()
+    raw[policy.HEAD_IMAGE_KEY] = np.zeros(shape, dtype=np.uint8)
+    with pytest.raises(ValueError, match="requires original RGB shape"):
+        policy.LingdongRightArmInputs(crop_head=True)(raw)
+
+
+@pytest.mark.parametrize(
+    ("crop_name", "legacy_name"),
+    [(policy.CROP_CONFIG_NAME, policy.CONFIG_NAME), (policy.RELATIVE_CROP_CONFIG_NAME, policy.RELATIVE_CONFIG_NAME)],
+)
+def test_crop_presets_share_numeric_assets_and_apply_same_serving_transform(tmp_path, monkeypatch, crop_name, legacy_name):
+    monkeypatch.setattr(config.ModelTransformFactory, "__call__", lambda self, model: transforms.Group())
+    preset = config.get_config(crop_name)
+    legacy = config.get_config(legacy_name)
+    assert preset.data.crop_head
+    assert not legacy.data.crop_head
+    assert preset.data.assets.asset_id == legacy.data.assets.asset_id
+    assert preset.data.assets.assets_dir == str(legacy.assets_dirs)
+    assert preset.model == legacy.model
+    assert preset.lr_schedule == legacy.lr_schedule
+    assert preset.policy_metadata["head_crop_xyxy"] == (240, 160, 560, 480)
+    factory = dataclasses.replace(
+        preset.data, dataset_root=str(tmp_path), augment_prompts=False,
+        assets=dataclasses.replace(preset.data.assets, assets_dir=str(tmp_path / "assets")),
+    )
+    data = factory.create(tmp_path / "assets", preset.model)
+    raw = raw_sample()
+    raw[policy.HEAD_IMAGE_KEY] = np.zeros((480, 640, 3), dtype=np.uint8)
+    del raw["action"]
+    result = transforms.compose(data.data_transforms.inputs)(raw)
+    assert result["image"]["base_0_rgb"].shape == (320, 320, 3)
+    assert result["image"]["right_wrist_0_rgb"].shape == (8, 12, 3)
+
+
 @pytest.mark.parametrize("selected", [False, True])
 def test_gripper_events_preserve_state_joints_and_source(selected):
     raw = raw_sample()

@@ -11,6 +11,9 @@ DEFAULT_PYTHON=/opt/conda/envs/pi-rl/bin/python
 [[ -x "$DEFAULT_PYTHON" ]] || DEFAULT_PYTHON=python3
 PYTHON="${PYTHON:-$DEFAULT_PYTHON}"
 CHECKPOINT="${CHECKPOINT:-/oss/embodied-ai-data/lingdong/pi05_lingdong_right_arm/lingdong_right_arm_1027_163358/10000}"
+# Keep the legacy default paired with the legacy default checkpoint. Crop-trained
+# checkpoints must use their matching *_crop config.
+POLICY_CONFIG="${POLICY_CONFIG:-pi05_lingdong_right_arm}"
 INFERENCE_MODE="${INFERENCE_MODE:-standard}"
 case "$INFERENCE_MODE" in
     standard|rtc) ;;
@@ -30,7 +33,7 @@ if [[ "$INFERENCE_MODE" == rtc ]]; then
         --rtc-prefix-schedule "${RTC_PREFIX_SCHEDULE:-exp}"
     )
 fi
-ARGS+=(policy:checkpoint --policy.config pi05_lingdong_right_arm --policy.dir "$CHECKPOINT")
+ARGS+=(policy:checkpoint --policy.config "$POLICY_CONFIG" --policy.dir "$CHECKPOINT")
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
     printf '%q ' "$PYTHON" "${ARGS[@]}" "$@"
     printf '\n'

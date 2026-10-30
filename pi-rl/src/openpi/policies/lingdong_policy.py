@@ -11,11 +11,16 @@ CONFIG_NAME = "pi05_lingdong_right_arm"
 ASSET_ID = "lingdong_right_arm"
 RELATIVE_CONFIG_NAME = "pi05_lingdong_right_arm_relative"
 RELATIVE_ASSET_ID = "lingdong_right_arm_relative"
+CROP_CONFIG_NAME = "pi05_lingdong_right_arm_crop"
+RELATIVE_CROP_CONFIG_NAME = "pi05_lingdong_right_arm_relative_crop"
 DEFAULT_DATASET_ROOT = "/mnt/rynnbot_hangzhou/hdc/pku/datasets/lingdong"
 DATASET_NAMES = ("lerobot_2026-10-26_12-09-32_final",)
 HEAD_IMAGE_KEY = "observation.images.cam_high"
 RIGHT_IMAGE_KEY = "observation.images.cam_right_wrist"
 VIDEO_KEYS = (HEAD_IMAGE_KEY, RIGHT_IMAGE_KEY)
+HEAD_IMAGE_SHAPE = (480, 640, 3)
+# Approved fixed ROI in the original head camera image; right/bottom are exclusive.
+HEAD_CROP_XYXY = (240, 160, 560, 480)
 RIGHT_NAMES = (
     "abad_R_Joint",
     "hip_R_Joint",
@@ -225,15 +230,23 @@ class LingdongRightArmInputs:
     Raw 18-D training/serving inputs are selected by metadata-derived indices.
     Inference may instead provide an 8-D state in RIGHT_NAMES order. Wrist videos
     in these datasets are already corrected; no additional swapping is applied.
+    Crop presets select the fixed head ROI before the shared model resize.
     """
 
     state_indices: tuple[int, ...] = RIGHT_INDICES
     action_indices: tuple[int, ...] = RIGHT_INDICES
+    crop_head: bool = False
 
     def __call__(self, data: dict) -> dict:
+        head = _image(data[HEAD_IMAGE_KEY])
+        if self.crop_head:
+            if head.shape != HEAD_IMAGE_SHAPE:
+                raise ValueError(f"Lingdong head crop requires original RGB shape {HEAD_IMAGE_SHAPE}, got {head.shape}")
+            left, top, right, bottom = HEAD_CROP_XYXY
+            head = np.ascontiguousarray(head[top:bottom, left:right])
         result = {
             "state": _right(data["observation.state"], self.state_indices, sequence=False),
-            "image": {"base_0_rgb": _image(data[HEAD_IMAGE_KEY]), "right_wrist_0_rgb": _image(data[RIGHT_IMAGE_KEY])},
+            "image": {"base_0_rgb": head, "right_wrist_0_rgb": _image(data[RIGHT_IMAGE_KEY])},
             "image_mask": {"base_0_rgb": np.True_, "right_wrist_0_rgb": np.True_},
         }
         if "action" in data:

@@ -838,11 +838,13 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
     # Each joint target in a relative chunk is referenced to the current measured state.
     # The binary gripper command remains absolute.
     action_representation: Literal["absolute", "relative"] = "absolute"
+    # The crop presets use the approved 320x320 ROI from the original head image.
+    crop_head: bool = False
     augment_prompts: bool = True
     # Defaults to the validated episode-scene asset next to normalization statistics.
     scene_prompts_path: str | None = None
-    # Training-only probability of omitting the entire state token segment.
-    state_dropout_prob: float = 0.5
+    # Training-only probability of omitting state tokens; keep state by default.
+    state_dropout_prob: float = 0.0
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
@@ -880,7 +882,7 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
         if self.state_dropout_prob > 0:
             training_transforms.append(state_dropout)
         data_transforms = _transforms.Group(
-            inputs=[lingdong_policy.LingdongRightArmInputs(state_indices, action_indices)],
+            inputs=[lingdong_policy.LingdongRightArmInputs(state_indices, action_indices, crop_head=self.crop_head)],
             outputs=[lingdong_policy.LingdongRightArmOutputs()],
         )
         if self.action_representation == "relative":
@@ -4241,6 +4243,28 @@ _CONFIGS += [
     )
     for config in _CONFIGS
     if config.name == lingdong_policy.CONFIG_NAME
+]
+
+# Crop presets have distinct checkpoint/config names so existing full-frame
+# checkpoints retain their original preprocessing. Numeric norm/language assets
+# are shared with the matching action representation.
+_CONFIGS += [
+    dataclasses.replace(
+        config,
+        name=f"{config.name}_crop",
+        data=dataclasses.replace(
+            config.data,
+            crop_head=True,
+            assets=dataclasses.replace(config.data.assets, assets_dir=str(config.assets_dirs)),
+        ),
+        policy_metadata={
+            **config.policy_metadata,
+            "head_source_image_shape": lingdong_policy.HEAD_IMAGE_SHAPE,
+            "head_crop_xyxy": lingdong_policy.HEAD_CROP_XYXY,
+        },
+    )
+    for config in _CONFIGS
+    if config.name in (lingdong_policy.CONFIG_NAME, lingdong_policy.RELATIVE_CONFIG_NAME)
 ]
 
 # Keep training hyperparameters identical across action representations. Relative

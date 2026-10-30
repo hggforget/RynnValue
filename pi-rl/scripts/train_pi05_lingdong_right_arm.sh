@@ -52,8 +52,8 @@ for ((i=0; i<${#CLI_ARGS[@]}; i++)); do
     esac
 done
 case "$ACTION_REPRESENTATION" in
-    absolute) CONFIG=pi05_lingdong_right_arm; EXP_PREFIX=lingdong_right_arm ;;
-    relative) CONFIG=pi05_lingdong_right_arm_relative; EXP_PREFIX=lingdong_right_arm_relative ;;
+    absolute) CONFIG=pi05_lingdong_right_arm_crop; EXP_PREFIX=lingdong_right_arm_crop ;;
+    relative) CONFIG=pi05_lingdong_right_arm_relative_crop; EXP_PREFIX=lingdong_right_arm_relative_crop ;;
     *) echo "ACTION_REPRESENTATION must be absolute or relative." >&2; exit 1 ;;
 esac
 if [[ ! "$ACTION_HORIZON" =~ ^[1-9][0-9]*$ ]]; then

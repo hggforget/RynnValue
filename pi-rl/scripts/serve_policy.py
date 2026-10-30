@@ -113,8 +113,8 @@ def create_policy(args: Args) -> _policy.Policy:
     if args.inference_mode == "rtc":
         if args.dsrl_ckpt_dir or not isinstance(args.policy, Checkpoint):
             raise ValueError("RTC requires an explicit Lingdong checkpoint and cannot be combined with DSRL")
-        if args.policy.config != "pi05_lingdong_right_arm":
-            raise ValueError("RTC currently supports config pi05_lingdong_right_arm")
+        if args.policy.config not in ("pi05_lingdong_right_arm", "pi05_lingdong_right_arm_crop"):
+            raise ValueError("RTC currently supports absolute Lingdong full-frame and crop configs")
         from openpi.models.rtc import RTCConfig
         from openpi.policies.rtc_policy import RTCPolicy
 

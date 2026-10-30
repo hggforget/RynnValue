@@ -80,11 +80,12 @@ def test_training_and_norm_preflight_agree(launch_env, script, extra_env, cli, r
         assert int(args[args.index("--action-horizon") + 1]) == horizon
         assert args[args.index("--dataset-root") + 1] == launch_env["DATA_ROOT"]
     assert calls[1][-1] == "--check"
-    name = policy.RELATIVE_CONFIG_NAME if representation == "relative" else policy.CONFIG_NAME
+    name = policy.RELATIVE_CROP_CONFIG_NAME if representation == "relative" else policy.CROP_CONFIG_NAME
     assert calls[2][:2] == ["scripts/train.py", name]
     # Parse the actual generated command, including forwarded CLI overrides.
     parsed = tyro.extras.overridable_config_cli({name: (name, config.get_config(name))}, args=calls[2][1:])
     assert parsed.data.action_representation == representation
+    assert parsed.data.crop_head
     assert parsed.model.action_horizon == horizon
     assert parsed.batch_size == (64 if "--batch-size" in cli else 32)
 
@@ -103,7 +104,7 @@ def test_skip_norm_still_checks_relative_assets(launch_env):
     assert len(calls) == 2
     assert calls[0][-1] == "--check"
     assert calls[0][calls[0].index("--action-representation") + 1] == "relative"
-    assert calls[1][1] == policy.RELATIVE_CONFIG_NAME
+    assert calls[1][1] == policy.RELATIVE_CROP_CONFIG_NAME
 
 
 def test_relative_dry_run_does_not_launch_python(launch_env):
@@ -117,7 +118,7 @@ def test_relative_dry_run_does_not_launch_python(launch_env):
     )
     assert result.returncode == 0, result.stderr
     command = shlex.split(result.stdout.splitlines()[-1])
-    assert command[1:3] == ["scripts/train.py", policy.RELATIVE_CONFIG_NAME]
+    assert command[1:3] == ["scripts/train.py", policy.RELATIVE_CROP_CONFIG_NAME]
     assert not Path(launch_env["LAUNCH_LOG"]).exists()
 
 
