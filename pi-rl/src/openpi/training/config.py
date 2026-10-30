@@ -2449,7 +2449,6 @@ class TrainConfig:
 # Shared by Lingdong and the collect-objects SFT reference launcher.
 _COLLECT_OBJECTS_SFT_HYPERPARAMS = dict(
     batch_size=16,
-    num_workers=4,
     num_train_steps=20_000,
     lr_schedule=_optimizer.CosineDecaySchedule(
         warmup_steps=1_000, peak_lr=5e-5, decay_steps=20_000, decay_lr=5e-6,
@@ -2469,6 +2468,7 @@ _CONFIGS = [
     TrainConfig(
         **_COLLECT_OBJECTS_SFT_HYPERPARAMS,
         name=lingdong_policy.CONFIG_NAME,
+        num_workers=32,
         model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
         data=LeRobotLingdongRightArmDataConfig(
             repo_id=lingdong_policy.ASSET_ID,
@@ -2522,6 +2522,7 @@ _CONFIGS = [
     TrainConfig(
         **_COLLECT_OBJECTS_SFT_HYPERPARAMS,
         name="pi05_pku_franka_collect_objects",
+        num_workers=4,
         model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
         data=LeRobotPkuFrankaCollectDataConfig(
             repo_id="/home/hdc/workspace/DATA/local/fr3_collect_objects_20261017",
