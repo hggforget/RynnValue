@@ -278,16 +278,16 @@ GPU backend, and runs the existing Lingdong launcher. It automatically uses the
 complete shared Python 3.10 wheel bundle under
 `/oss/embodied-ai-data/lingdong/nebula_wheels/pi_rl_py310_<requirements-sha256-prefix>`
 when its manifest exists, installing without an index. `--wheelhouse` selects a
-different bundle; it must include all dependencies and local-package build
-requirements. Build one on a connected Python 3.10 Linux host with
+different bundle; it must include all dependencies, the validated LeRobot wheel,
+and local-package build requirements. Build one on a connected Python 3.10 Linux host with
 `PYTHON=/path/to/python bash scripts/prepare_nebula_wheelhouse.sh /tmp/wheels`.
 Without a bundle, setup uses the internal index `https://pypi.antfin-inc.com/simple/`
 unless `PIP_INDEX_URL` is already set, and checks access before installing.
 Submission-host access does not establish worker connectivity. To explicitly use
 an index, pass `--wheelhouse '' --pip-index-url <url>`. Setup logs are copied
 to `/oss/embodied-ai-data/lingdong/nebula_setup_logs/<experiment>.log`.
-LeRobot comes from the
-existing shared source under the second bucket. Use `--skip-setup` only with a
+LeRobot installs from its bundled wheel when available; otherwise it requires
+`LEROBOT_ROOT` (the shared source under the second bucket by default). Use `--skip-setup` only with a
 prepared image. W&B runs offline by default, so startup needs no interactive login.
 
 ## Updates

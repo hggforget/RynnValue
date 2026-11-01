@@ -20,8 +20,14 @@ else
 fi
 "$PYTHON" -m pip install -r scripts/requirements-nebula.txt
 LEROBOT_ROOT="${LEROBOT_ROOT:-/public/damo_rynnvla_data_zjk/RynnValue/third_party/lerobot}"
-[[ -f "$LEROBOT_ROOT/pyproject.toml" ]] || { echo "LeRobot source missing: $LEROBOT_ROOT" >&2; exit 1; }
-"$PYTHON" -m pip install --no-deps "$LEROBOT_ROOT"
+if [[ -n "${NEBULA_WHEELHOUSE:-}" && -f "$NEBULA_WHEELHOUSE/lerobot-0.1.0-py3-none-any.whl" ]]; then
+    "$PYTHON" -m pip install --no-deps --force-reinstall "$NEBULA_WHEELHOUSE/lerobot-0.1.0-py3-none-any.whl"
+elif [[ -f "$LEROBOT_ROOT/pyproject.toml" ]]; then
+    "$PYTHON" -m pip install --no-deps "$LEROBOT_ROOT"
+else
+    echo "LeRobot unavailable: include its wheel in NEBULA_WHEELHOUSE or set LEROBOT_ROOT to its source." >&2
+    exit 1
+fi
 "$PYTHON" -m pip install --no-deps -e packages/openpi-client -e third_party/jaxrl2 -e .
 PYTHONPATH="src:third_party/jaxrl2:packages/openpi-client/src${PYTHONPATH:+:$PYTHONPATH}" \
     "$PYTHON" -c 'from openpi.training import config, data_loader, rl_data_loader; import jaxrl2; print("Training imports passed")'
