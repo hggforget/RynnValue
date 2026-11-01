@@ -17,6 +17,14 @@ DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "assets" / policy.CONFIG_
 RELATIVE_OUTPUT = DEFAULT_OUTPUT.parents[1] / policy.RELATIVE_CONFIG_NAME / policy.RELATIVE_ASSET_ID
 
 
+def _manifest_signature(manifest: dict, *, portable: bool = False) -> str:
+    value = {key: item for key, item in manifest.items() if key != "signature"}
+    if portable:
+        # Keep dataset identity and content hashes, independent of where OSS is mounted.
+        value["sources"] = [{**source, "repo_id": Path(source["repo_id"]).name} for source in value["sources"]]
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
 def dataset_manifest(
     dataset_root: Path, *, action_representation: str = "absolute", action_horizon: int = 30
 ) -> tuple[dict, list[tuple]]:
@@ -67,13 +75,15 @@ def dataset_manifest(
                 "exact pooled 1% and 99% quantiles over all chunk positions."
             ),
         )
-    value["signature"] = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    value["signature"] = _manifest_signature(value)
     return value, jobs
 
 
 def validate(output: Path, manifest: dict) -> None:
     saved = json.loads((output / "norm_stats_manifest.json").read_text())
-    if saved["signature"] != manifest["signature"]:
+    if any(item.get("signature") != _manifest_signature(item) for item in (saved, manifest)) or _manifest_signature(
+        saved, portable=True
+    ) != _manifest_signature(manifest, portable=True):
         raise ValueError("Normalization sources or action preprocessing changed; recompute Lingdong norms")
     stats = normalize.load(output)
     for key in ("state", "actions"):

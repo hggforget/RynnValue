@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 
 import numpy as np
 import pyarrow as pa
@@ -142,3 +143,60 @@ def test_relative_check_rejects_absolute_assets(dataset, tmp_path):
     norms.compute(root, output, workers=1)
     with pytest.raises(ValueError, match="preprocessing changed"):
         norms.compute(root, output, check=True, action_representation="relative")
+
+
+@pytest.mark.parametrize("representation", ["absolute", "relative"])
+def test_norms_validate_across_worker_mounts_without_rewriting_assets(dataset, tmp_path, representation):
+    root, _, _ = dataset
+    output = tmp_path / "assets"
+    kwargs = {"action_representation": representation, "action_horizon": 5}
+    norms.compute(root, output, workers=1, **kwargs)
+    before = {path.name: path.read_bytes() for path in output.iterdir()}
+    # The worker's /oss link resolves to a different /data/oss_bucket_0 mount.
+    mounted = tmp_path / "data" / "oss_bucket_0" / "lingdong"
+    shutil.copytree(root, mounted)
+    alias = tmp_path / "oss"
+    alias.symlink_to(mounted, target_is_directory=True)
+    current, _ = norms.dataset_manifest(alias, **kwargs)
+    saved = json.loads(before["norm_stats_manifest.json"])
+    assert saved["sources"][0]["repo_id"] != current["sources"][0]["repo_id"]
+    assert saved["signature"] != current["signature"]
+    norms.compute(alias, output, check=True, **kwargs)
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == before
+
+
+@pytest.mark.parametrize("filename", ["info.json", "episodes.jsonl", "tasks.jsonl", "file_checksums.json"])
+def test_relocated_dataset_metadata_changes_are_rejected(dataset, tmp_path, filename):
+    root, _, _ = dataset
+    output = tmp_path / "assets"
+    norms.compute(root, output, workers=1)
+    mounted = tmp_path / "oss_bucket_0"
+    shutil.copytree(root, mounted)
+    metadata = mounted / policy.DATASET_NAMES[0] / "meta" / filename
+    # Whitespace preserves the parsed schema/counts, but changes the content hash.
+    metadata.write_text((metadata.read_text() if metadata.exists() else "{}") + "\n")
+    with pytest.raises(ValueError, match="preprocessing changed"):
+        norms.compute(mounted, output, check=True)
+
+
+def test_relocated_dataset_identity_change_is_rejected(dataset, tmp_path, monkeypatch):
+    root, _, _ = dataset
+    output = tmp_path / "assets"
+    norms.compute(root, output, workers=1)
+    mounted = tmp_path / "oss_bucket_0"
+    shutil.copytree(root / policy.DATASET_NAMES[0], mounted / "other_dataset")
+    monkeypatch.setattr(policy, "DATASET_NAMES", ("other_dataset",))
+    with pytest.raises(ValueError, match="preprocessing changed"):
+        norms.compute(mounted, output, check=True)
+
+
+def test_manifest_payload_change_with_stale_signature_is_rejected(dataset, tmp_path):
+    root, _, _ = dataset
+    output = tmp_path / "assets"
+    norms.compute(root, output, workers=1)
+    path = output / "norm_stats_manifest.json"
+    saved = json.loads(path.read_text())
+    saved["action_gripper"]["initial_threshold"] += 0.1
+    path.write_text(json.dumps(saved))
+    with pytest.raises(ValueError, match="preprocessing changed"):
+        norms.compute(root, output, check=True)

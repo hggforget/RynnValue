@@ -271,6 +271,8 @@ counting devices with `nvidia-smi`. The FSDP shard count matches the detected GP
 count, and the global batch is `BATCH_SIZE_PER_GPU × detected GPU count`. The uploaded manifest
 contains no fixed GPU IDs or global batch. Nebula's `--gpus` option specifies the
 scheduler resource request.
+Normalization checks accept different mount prefixes for the same dataset,
+preserving metadata checksums, channel mappings and action-preprocessing checks.
 
 The worker entry `run_nebula.py` establishes the same OSS paths as local training,
 installs `scripts/requirements-nebula.txt` and the local packages, checks the JAX
