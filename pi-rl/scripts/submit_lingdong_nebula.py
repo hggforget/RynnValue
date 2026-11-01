@@ -134,6 +134,13 @@ def main():
     parser.add_argument("--reward-source", choices=("progress", "terminal"), default="progress")
     parser.add_argument("--assume-success", action="store_true")
     parser.add_argument("--skip-setup", action="store_true", help="Use only with a prepared worker image.")
+    parser.add_argument(
+        "--pip-index-url", help="Package index reachable from the worker; defaults to the internal index."
+    )
+    parser.add_argument(
+        "--wheelhouse",
+        help="Offline wheel bundle on the worker. Auto-detects the shared bundle; an empty value disables auto-detection.",
+    )
     parser.add_argument("--preflight-python", default="/opt/conda/envs/pi-rl/bin/python")
     parser.add_argument("--reference-root", type=Path, default=Path("/mnt/rynnbot_hangzhou/hdc/pi-rl"))
     parser.add_argument("--stage-dir", type=Path)
@@ -195,6 +202,10 @@ def main():
     }
     if args.reward_labels_path:
         launch["env"]["REWARD_LABELS_PATH"] = args.reward_labels_path
+    if args.pip_index_url:
+        launch["env"]["PIP_INDEX_URL"] = args.pip_index_url
+    if args.wheelhouse is not None:
+        launch["env"]["NEBULA_WHEELHOUSE"] = args.wheelhouse
     local_preflight(launch, args.preflight_python, args.gpus)
     stage = args.stage_dir or Path(tempfile.mkdtemp(prefix="lingdong-nebula-"))
     if args.stage_dir:

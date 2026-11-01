@@ -4,13 +4,42 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 
 
 def direct_environment():
     # Nebula and OSS endpoints are reachable directly from the internal network.
     return {key: value for key, value in os.environ.items() if not key.lower().endswith("_proxy")}
+
+
+def run_setup(root, env):
+    command = ["bash", str(root / "scripts/setup_nebula.sh")]
+    with tempfile.TemporaryDirectory(prefix="nebula-setup-") as directory:
+        local_log = Path(directory) / "setup.log"
+        with (
+            local_log.open("w") as log,
+            subprocess.Popen(
+                command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            ) as process,
+        ):
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+            code = process.wait()
+        # Keep an accessible copy even when the platform's log bucket is private.
+        try:
+            log_dir = Path(env.get("NEBULA_SETUP_LOG_DIR", "/oss/embodied-ai-data/lingdong/nebula_setup_logs"))
+            log_dir.mkdir(parents=True, exist_ok=True)
+            target = log_dir / (Path(env["EXP_NAME"]).name + ".log")
+            shutil.copyfile(local_log, target)
+            print(f"Setup log saved: {target}", flush=True)
+        except OSError as error:
+            print(f"Could not copy setup log to OSS: {error}", file=sys.stderr, flush=True)
+        if code:
+            raise subprocess.CalledProcessError(code, command)
 
 
 def main():
@@ -46,7 +75,7 @@ def main():
 
     subprocess.run(["nvidia-smi"], check=True, env=env)
     if not launch.get("skip_setup", False):
-        subprocess.run(["bash", str(root / "scripts/setup_nebula.sh")], cwd=root, env=env, check=True)
+        run_setup(root, env)
     # Check the actual container's JAX backend before opening a training run.
     subprocess.run(
         [sys.executable, "-c", "import jax; print(jax.devices()); assert jax.default_backend() == 'gpu'"],
