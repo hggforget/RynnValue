@@ -3,6 +3,7 @@
 import dataclasses
 import functools
 import json
+import logging
 import pathlib
 
 import numpy as np
@@ -13,6 +14,11 @@ RELATIVE_CONFIG_NAME = "pi05_lingdong_right_arm_relative"
 RELATIVE_ASSET_ID = "lingdong_right_arm_relative"
 CROP_CONFIG_NAME = "pi05_lingdong_right_arm_crop"
 RELATIVE_CROP_CONFIG_NAME = "pi05_lingdong_right_arm_relative_crop"
+SINGLE_TASK_CROP_CONFIGS = {
+    "pick_up": "pi05_lingdong_right_arm_pick_up_crop",
+    "put_down": "pi05_lingdong_right_arm_put_down_crop",
+}
+TASK_PROMPTS = {"pick_up": "pick up the object", "put_down": "put down the object"}
 DEFAULT_DATASET_ROOT = "/mnt/rynnbot_hangzhou/hdc/pku/datasets/lingdong"
 DATASET_NAMES = ("lerobot_2026-10-26_12-09-32_final",)
 HEAD_IMAGE_KEY = "observation.images.cam_high"
@@ -192,6 +198,55 @@ def dataset_indices(
     if len(set(mappings)) != 1:
         raise ValueError("Lingdong repos must share the same raw action/state channel order")
     return mappings[0]
+
+
+def task_episode_ids(
+    repo_ids: tuple[str, ...], task: str, *, allow_unmounted: bool = False
+) -> dict[str, tuple[int, ...]] | None:
+    """Select one task from final metadata, preserving original episode/frame indices.
+
+    Serving can load a checkpoint without mounted training data. If any source is
+    mounted, however, missing metadata or an empty task must fail rather than
+    silently training on both tasks.
+    """
+    if task == "all":
+        return None
+    if task not in TASK_PROMPTS:
+        raise ValueError("Lingdong task must be all, pick_up or put_down")
+    if (
+        allow_unmounted
+        and repo_ids
+        and not any((pathlib.Path(repo) / "meta/info.json").is_file() for repo in repo_ids)
+    ):
+        return None
+    if not repo_ids:
+        raise ValueError("Lingdong task selection requires dataset paths")
+    result = {}
+    for repo in repo_ids:
+        meta = pathlib.Path(repo) / "meta"
+        info = json.loads((meta / "info.json").read_text())
+        episodes = [json.loads(line) for line in (meta / "episodes.jsonl").read_text().splitlines() if line]
+        if len(episodes) != info["total_episodes"] or sum(row["length"] for row in episodes) != info["total_frames"]:
+            raise ValueError(f"Inconsistent Lingdong episode metadata: {repo}")
+        seen, selected = set(), []
+        frames = 0
+        for row in episodes:
+            index = row["episode_index"]
+            if type(index) is not int or index < 0 or index in seen:
+                raise ValueError(f"Invalid or duplicate Lingdong episode index: {repo}: {index}")
+            seen.add(index)
+            if row.get("tasks") not in ([prompt] for prompt in TASK_PROMPTS.values()):
+                raise ValueError(f"Expected one canonical Lingdong task per episode: {repo}: {index}")
+            if row["tasks"] == [TASK_PROMPTS[task]]:
+                selected.append(index)
+                frames += row["length"]
+        if not selected:
+            raise ValueError(f"No Lingdong {task} episodes found: {repo}")
+        result[repo] = tuple(selected)
+        logging.info(
+            "Lingdong %s: selected %d/%d episodes, %d frames from %s", task, len(selected), len(episodes), frames, repo
+        )
+    return result
 
 
 def _right(values, indices: tuple[int, ...], *, sequence: bool) -> np.ndarray:

@@ -17,7 +17,7 @@ Pi0.5 checkpoint serving and the Franka replay/live-observation client connect d
 
 ## Lingdong Tron2 right-arm training
 
-`pi05_lingdong_right_arm_crop` fine-tunes Pi0.5 on the single merged dataset `/oss/embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final`, mounted from `oss://embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final/`. It contains 2,810 startup-trimmed episodes and 854,106 frames, with `task_index=0` for pick-up and `task_index=1` for put-down. Sampling is uniform over all retained frames. Episodes are ordered by their original source index and reindexed from zero.
+`pi05_lingdong_right_arm_crop` fine-tunes Pi0.5 on the single merged dataset `/oss/embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final`, mounted from `oss://embodied-ai-data/lingdong/lerobot_2026-10-26_12-09-32_final/`. After the 2026-10-30 removal of 21 reviewed episodes, it contains 2,789 startup-trimmed episodes and 847,173 frames, with `task_index=0` for pick-up and `task_index=1` for put-down. Sampling is uniform over all retained frames. Episodes are ordered by their original source index and reindexed from zero.
 
 Only `observation.images.cam_high` and the already corrected `observation.images.cam_right_wrist` are decoded, mapped to `base_0_rgb` and `right_wrist_0_rgb`. Both state and action contain these eight recorded channels in order: `abad_R_Joint`, `hip_R_Joint`, `yaw_R_Joint`, `knee_R_Joint`, `wrist_yaw_R_Joint`, `wrist_pitch_R_Joint`, `wrist_roll_R_Joint`, `right_gripper`. Their canonical raw indices are `[7,8,9,10,11,12,13,17]`; the adapter resolves actual indices from metadata names. Joint targets and measured continuous gripper states are preserved. Model padding extends eight physical channels to the pretrained 32-D layout; inference outputs are reduced back to eight channels.
 
@@ -31,6 +31,33 @@ POLICY_CONFIG=pi05_lingdong_right_arm_crop CHECKPOINT=/path/to/crop/checkpoint \
 ```
 
 The serving launcher's default checkpoint is an earlier full-frame model and therefore still defaults to the original full-frame config. The cropped absolute config also supports `INFERENCE_MODE=rtc`.
+
+Two single-task presets use the same final dataset and select complete episodes by their canonical task in `meta/episodes.jsonl`. They preserve original episode/frame indices, so chunk boundaries, gripper events and scene prompts stay aligned. Sampling is uniform over the selected task's frames; mixed-task, incomplete or empty selections fail validation.
+
+| Task | Config | Episodes | Frames |
+|---|---|---:|---:|
+| Pick up | `pi05_lingdong_right_arm_pick_up_crop` | 1,474 | 487,262 |
+| Put down | `pi05_lingdong_right_arm_put_down_crop` | 1,315 | 359,911 |
+
+Both inherit the absolute-action crop baseline: 30-frame chunks at 30 FPS, binary gripper commands, unchanged prompt augmentation, state input and SFT hyperparameters. They deliberately share the baseline's full-dataset normalization and scene-language assets in `assets/pi05_lingdong_right_arm/lingdong_right_arm/`, isolating task sampling in this comparison. Each config writes to its own checkpoint directory. The launchers run the usual full-dataset normalization preflight; these two presets use absolute actions.
+
+```bash
+# Run from pi-rl; each command starts an independent training experiment.
+bash scripts/train_pi05_lingdong_right_arm_pick_up.sh
+bash scripts/train_pi05_lingdong_right_arm_put_down.sh
+
+# Equivalent task switches on the existing launcher; all is still the default.
+TASK=pick_up bash scripts/train_pi05_lingdong_right_arm.sh
+TASK=put_down bash scripts/train_pi05_lingdong_right_arm.sh
+
+# Preview a single-task command without starting training.
+DRY_RUN=1 bash scripts/train_pi05_lingdong_right_arm_pick_up.sh
+
+# Serve with the corresponding single-task config and the full source images.
+POLICY_CONFIG=pi05_lingdong_right_arm_pick_up_crop CHECKPOINT=/path/to/pick_up/checkpoint \
+    bash scripts/serve_pi05_lingdong_right_arm.sh
+# For put-down: POLICY_CONFIG=pi05_lingdong_right_arm_put_down_crop.
+```
 
 Binary gripper actions are inferred from complete episode trajectories before normalization. A three-frame median removes isolated interior spikes. An opening/closing event is confirmed when the cumulative change from the previous extremum reaches 0.05, then backdated to the last extremum before motion. Commands remain 1 (open) or 0 (close) through intermediate plateaus, small reverse excursions, and the final hold. The 0.6 threshold initializes only the first state. Each dataset worker reads an episode's numeric actions once and caches its byte-sized labels; 30-frame training chunks index those labels by the original `episode_index` and `frame_index`, repeating the terminal label when padded. Labels therefore agree for overlapping chunks and cannot reset at a chunk boundary. Both normalization and training use the same detector.
 

@@ -831,10 +831,11 @@ class LeRobotRobotwinMultiDataConfig(MultiDataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
-    """Read the merged final Tron2 dataset with two task prompts and 8-D right control."""
+    """Read both tasks or one task from the merged final Tron2 right-arm dataset."""
 
     dataset_root: str = lingdong_policy.DEFAULT_DATASET_ROOT
     dataset_names: tuple[str, ...] = lingdong_policy.DATASET_NAMES
+    task: Literal["all", "pick_up", "put_down"] = "all"
     # Each joint target in a relative chunk is referenced to the current measured state.
     # The binary gripper command remains absolute.
     action_representation: Literal["absolute", "relative"] = "absolute"
@@ -857,6 +858,7 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
             raise ValueError("Lingdong state dropout requires pi05 with discrete_state_input=True")
         repo_ids = self.repo_ids or tuple(str(pathlib.Path(self.dataset_root) / name) for name in self.dataset_names)
         state_indices, action_indices = lingdong_policy.dataset_indices(repo_ids, allow_unmounted=True)
+        episode_ids = lingdong_policy.task_episode_ids(repo_ids, self.task, allow_unmounted=True)
         training_transforms: list[_transforms.DataTransformFn] = []
         if self.augment_prompts:
             scene_path = pathlib.Path(self.scene_prompts_path) if self.scene_prompts_path else (
@@ -899,6 +901,7 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
             prompt_from_task=True,
             video_backend="pyav",
             video_keys=lingdong_policy.VIDEO_KEYS,
+            episode_ids=episode_ids,
         )
 
 
@@ -4265,6 +4268,24 @@ _CONFIGS += [
     )
     for config in _CONFIGS
     if config.name in (lingdong_policy.CONFIG_NAME, lingdong_policy.RELATIVE_CONFIG_NAME)
+]
+
+# Single-task ablations change only episode sampling. They reuse the absolute
+# crop preset's normalization/language assets and keep separate checkpoints.
+_CONFIGS += [
+    dataclasses.replace(
+        config,
+        name=name,
+        data=dataclasses.replace(config.data, task=task),
+        policy_metadata={
+            **config.policy_metadata,
+            "task": task,
+            "task_prompt": lingdong_policy.TASK_PROMPTS[task],
+        },
+    )
+    for config in _CONFIGS
+    if config.name == lingdong_policy.CROP_CONFIG_NAME
+    for task, name in lingdong_policy.SINGLE_TASK_CROP_CONFIGS.items()
 ]
 
 # Keep training hyperparameters identical across action representations. Relative

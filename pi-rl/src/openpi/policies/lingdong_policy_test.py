@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from openpi import transforms
+from openpi.policies import lingdong_language
 from openpi.policies import lingdong_policy as policy
 from openpi.training import config
 from openpi.training import data_loader
@@ -122,6 +123,119 @@ def test_crop_presets_share_numeric_assets_and_apply_same_serving_transform(tmp_
     result = transforms.compose(data.data_transforms.inputs)(raw)
     assert result["image"]["base_0_rgb"].shape == (320, 320, 3)
     assert result["image"]["right_wrist_0_rgb"].shape == (8, 12, 3)
+
+
+@pytest.fixture
+def task_dataset(tmp_path):
+    repo = tmp_path / policy.DATASET_NAMES[0]
+    meta = repo / "meta"
+    meta.mkdir(parents=True)
+    rows = [
+        {"episode_index": index, "tasks": [policy.TASK_PROMPTS[task]], "length": 3 + index}
+        for index, task in enumerate(("put_down", "pick_up", "put_down", "pick_up"))
+    ]
+    (meta / "info.json").write_text(json.dumps({**metadata(), "total_episodes": 4, "total_frames": 18}))
+    (meta / "episodes.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (meta / "tasks.jsonl").write_text(
+        "".join(
+            json.dumps({"task_index": index, "task": prompt}) + "\n"
+            for index, prompt in enumerate(policy.TASK_PROMPTS.values())
+        )
+    )
+    asset = tmp_path / "assets" / policy.ASSET_ID / lingdong_language.ASSET_NAME
+    asset.parent.mkdir(parents=True)
+    asset.write_text(
+        json.dumps({
+            "version": lingdong_language.VERSION,
+            "complete": True,
+            "dataset_signature": lingdong_language.dataset_signature(repo),
+            "episodes": {
+                str(row["episode_index"]): {
+                    "canonical_prompt": row["tasks"][0],
+                    "task_type": next(task for task, prompt in policy.TASK_PROMPTS.items() if prompt == row["tasks"][0]),
+                    "accepted": False,
+                    "scene_variants": [],
+                }
+                for row in rows
+            },
+        })
+    )
+    return repo, rows
+
+
+@pytest.mark.parametrize(("task", "expected"), [("pick_up", (1, 3)), ("put_down", (0, 2))])
+def test_single_task_presets_select_original_episodes_and_reuse_baseline_assets(
+    task_dataset, monkeypatch, task, expected
+):
+    repo, rows = task_dataset
+    monkeypatch.setattr(config.ModelTransformFactory, "__call__", lambda self, model: transforms.Group())
+    preset = config.get_config(policy.SINGLE_TASK_CROP_CONFIGS[task])
+    baseline = config.get_config(policy.CROP_CONFIG_NAME)
+    factory = dataclasses.replace(
+        preset.data, dataset_root=str(repo.parent),
+        assets=dataclasses.replace(preset.data.assets, assets_dir=str(repo.parent / "assets")),
+    )
+    data = factory.create(preset.assets_dirs, preset.model)
+    assert data.episode_ids == {str(repo): expected}
+    assert all(rows[index]["tasks"] == [policy.TASK_PROMPTS[task]] for index in expected)
+    assert data.repo_ids == (str(repo),)
+    assert data.asset_id == baseline.data.assets.asset_id
+    assert preset.data.assets == baseline.data.assets
+    assert preset.model == baseline.model
+    assert preset.lr_schedule == baseline.lr_schedule
+    assert preset.data.crop_head
+    assert preset.policy_metadata["head_crop_xyxy"] == baseline.policy_metadata["head_crop_xyxy"]
+    assert preset.policy_metadata["task"] == task
+    assert preset.policy_metadata["task_prompt"] == policy.TASK_PROMPTS[task]
+    augmentation = next(t for t in data.training_transforms.inputs if isinstance(t, policy.LingdongPromptAugmentation))
+    assert all(augmentation.scene_prompts[0][index]["canonical_prompt"] == policy.TASK_PROMPTS[task] for index in expected)
+    assert dataclasses.replace(preset, exp_name="same").checkpoint_dir != (
+        dataclasses.replace(baseline, exp_name="same").checkpoint_dir
+    )
+
+
+def test_task_selections_partition_the_final_dataset_without_reindexing(task_dataset):
+    repo, rows = task_dataset
+    selected = {task: policy.task_episode_ids((str(repo),), task)[str(repo)] for task in policy.TASK_PROMPTS}
+    assert set(selected["pick_up"]).isdisjoint(selected["put_down"])
+    assert set(selected["pick_up"]) | set(selected["put_down"]) == {row["episode_index"] for row in rows}
+    assert policy.task_episode_ids((str(repo),), "all") is None
+
+
+@pytest.mark.parametrize("task", ["pick_up", "put_down"])
+def test_single_task_serving_allows_unmounted_data_but_mounted_missing_metadata_fails(tmp_path, monkeypatch, task):
+    monkeypatch.setattr(config.ModelTransformFactory, "__call__", lambda self, model: transforms.Group())
+    preset = config.get_config(policy.SINGLE_TASK_CROP_CONFIGS[task])
+    factory = dataclasses.replace(preset.data, dataset_root=str(tmp_path))
+    assert factory.create(preset.assets_dirs, preset.model).episode_ids is None
+    meta = tmp_path / policy.DATASET_NAMES[0] / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps(metadata()))
+    with pytest.raises(FileNotFoundError, match="episodes.jsonl"):
+        factory.create(preset.assets_dirs, preset.model)
+
+
+@pytest.mark.parametrize("failure", ["empty_task", "mixed_tasks", "duplicate_id", "missing_episode"])
+def test_task_filter_rejects_empty_or_inconsistent_selections(task_dataset, failure):
+    repo, rows = task_dataset
+    if failure == "empty_task":
+        for row in rows:
+            row["tasks"] = [policy.TASK_PROMPTS["put_down"]]
+    elif failure == "mixed_tasks":
+        rows[1]["tasks"] = list(policy.TASK_PROMPTS.values())
+    elif failure == "duplicate_id":
+        rows[1]["episode_index"] = rows[0]["episode_index"]
+    else:
+        rows.pop()
+    (repo / "meta/episodes.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    message = {
+        "empty_task": "No Lingdong pick_up episodes",
+        "mixed_tasks": "Expected one canonical Lingdong task",
+        "duplicate_id": "Invalid or duplicate Lingdong episode index",
+        "missing_episode": "Inconsistent Lingdong episode metadata",
+    }[failure]
+    with pytest.raises(ValueError, match=message):
+        policy.task_episode_ids((str(repo),), "pick_up")
 
 
 @pytest.mark.parametrize("selected", [False, True])

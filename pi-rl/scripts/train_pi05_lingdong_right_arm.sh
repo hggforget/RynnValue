@@ -6,10 +6,12 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 DEFAULT_PYTHON=/opt/conda/envs/pku-pi-rl/bin/python
+[[ -x "$DEFAULT_PYTHON" ]] || DEFAULT_PYTHON=/opt/conda/envs/pi-rl/bin/python
 [[ -x "$DEFAULT_PYTHON" ]] || DEFAULT_PYTHON=python3
 PYTHON="${PYTHON:-$DEFAULT_PYTHON}"
 ACTION_REPRESENTATION="${ACTION_REPRESENTATION:-absolute}"
 ACTION_HORIZON="${ACTION_HORIZON:-30}"
+TASK="${TASK:-all}"
 
 # Read data and base weights directly from OSS unless explicitly overridden.
 DATA_ROOT="${DATA_ROOT:-/oss/embodied-ai-data/lingdong}"
@@ -49,12 +51,26 @@ for ((i=0; i<${#CLI_ARGS[@]}; i++)); do
         --model.action-horizon=*) ACTION_HORIZON="${CLI_ARGS[i]#*=}" ;;
         --data.dataset-root) DATA_ROOT="${CLI_ARGS[i+1]:-}" ;;
         --data.dataset-root=*) DATA_ROOT="${CLI_ARGS[i]#*=}" ;;
+        --data.task) TASK="${CLI_ARGS[i+1]:-}" ;;
+        --data.task=*) TASK="${CLI_ARGS[i]#*=}" ;;
     esac
 done
 case "$ACTION_REPRESENTATION" in
     absolute) CONFIG=pi05_lingdong_right_arm_crop; EXP_PREFIX=lingdong_right_arm_crop ;;
     relative) CONFIG=pi05_lingdong_right_arm_relative_crop; EXP_PREFIX=lingdong_right_arm_relative_crop ;;
     *) echo "ACTION_REPRESENTATION must be absolute or relative." >&2; exit 1 ;;
+esac
+case "$TASK" in
+    all) ;;
+    pick_up|put_down)
+        if [[ "$ACTION_REPRESENTATION" != absolute ]]; then
+            echo "Single-task presets use absolute actions; set ACTION_REPRESENTATION=absolute." >&2
+            exit 1
+        fi
+        CONFIG="pi05_lingdong_right_arm_${TASK}_crop"
+        EXP_PREFIX="lingdong_right_arm_${TASK}_crop"
+        ;;
+    *) echo "TASK must be all, pick_up or put_down." >&2; exit 1 ;;
 esac
 if [[ ! "$ACTION_HORIZON" =~ ^[1-9][0-9]*$ ]]; then
     echo "ACTION_HORIZON must be a positive integer." >&2
@@ -83,13 +99,14 @@ TRAIN_ARGS=(
     scripts/train.py "$CONFIG"
     --exp-name "$EXP_NAME"
     --data.dataset-root "$DATA_ROOT"
+    --data.task "$TASK"
     --weight-loader.params-path "$WEIGHT_PARAMS_PATH"
     --checkpoint-base-dir "$CKPT_BASE_DIR"
     --fsdp-devices "$FSDP_DEVICES"
     --batch-size "$BATCH_SIZE"
     --model.action-horizon "$ACTION_HORIZON"
 )
-echo "Starting $CONFIG: data=$DATA_ROOT, weights=$WEIGHT_PARAMS_PATH, checkpoints=$CKPT_BASE_DIR, openpi_cache=$OPENPI_DATA_HOME, GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, batch_per_gpu=$((BATCH_SIZE / ${#GPU_LIST[@]})), action_representation=$ACTION_REPRESENTATION, action_horizon=$ACTION_HORIZON, experiment=$EXP_NAME"
+echo "Starting $CONFIG: data=$DATA_ROOT, task=$TASK, weights=$WEIGHT_PARAMS_PATH, checkpoints=$CKPT_BASE_DIR, openpi_cache=$OPENPI_DATA_HOME, GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, batch_per_gpu=$((BATCH_SIZE / ${#GPU_LIST[@]})), action_representation=$ACTION_REPRESENTATION, action_horizon=$ACTION_HORIZON, experiment=$EXP_NAME"
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '%q ' "$PYTHON" "${TRAIN_ARGS[@]}" "$@"
     printf '\n'
@@ -97,6 +114,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
 fi
 
 # Match reference SFT preflight: compute norms on CPU unless SKIP_NORM=1.
+# Single-task presets share full-dataset norms with the two-task baseline.
 # Whole-episode gripper events are shared across modes; relative statistics cover
 # every chunk position with terminal padding. No videos are decoded. Even when
 # skipping, require finite 8-D stats with the current source/preprocessing fingerprint.

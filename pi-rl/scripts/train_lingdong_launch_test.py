@@ -32,7 +32,7 @@ def launch_env(tmp_path):
     )
     fake_python.chmod(0o755)
     env = dict(os.environ)
-    for key in ("INIT_CHECKPOINT", "ACTION_REPRESENTATION", "ACTION_HORIZON", "BATCH_SIZE", "SKIP_NORM", "DRY_RUN"):
+    for key in ("INIT_CHECKPOINT", "ACTION_REPRESENTATION", "ACTION_HORIZON", "TASK", "BATCH_SIZE", "SKIP_NORM", "DRY_RUN"):
         env.pop(key, None)
     env.update(
         PYTHON=str(fake_python),
@@ -86,6 +86,7 @@ def test_training_and_norm_preflight_agree(launch_env, script, extra_env, cli, r
     parsed = tyro.extras.overridable_config_cli({name: (name, config.get_config(name))}, args=calls[2][1:])
     assert parsed.data.action_representation == representation
     assert parsed.data.crop_head
+    assert parsed.data.task == "all"
     assert parsed.model.action_horizon == horizon
     assert parsed.batch_size == (64 if "--batch-size" in cli else 32)
 
@@ -122,7 +123,52 @@ def test_relative_dry_run_does_not_launch_python(launch_env):
     assert not Path(launch_env["LAUNCH_LOG"]).exists()
 
 
-@pytest.mark.parametrize("extra_env", [{"ACTION_REPRESENTATION": "bad"}, {"ACTION_HORIZON": "0"}])
+@pytest.mark.parametrize(
+    ("script", "extra_env", "cli", "task"),
+    [
+        ("train_pi05_lingdong_right_arm_pick_up.sh", {}, [], "pick_up"),
+        ("train_pi05_lingdong_right_arm_put_down.sh", {}, [], "put_down"),
+        ("train_pi05_lingdong_right_arm.sh", {"TASK": "pick_up"}, [], "pick_up"),
+        ("train_pi05_lingdong_right_arm.sh", {"TASK": "put_down"}, [], "put_down"),
+        ("train_pi05_lingdong_right_arm.sh", {}, ["--data.task", "pick_up"], "pick_up"),
+        ("train_pi05_lingdong_right_arm.sh", {}, ["--data.task=put_down"], "put_down"),
+    ],
+)
+def test_single_task_launchers_select_matching_config_and_keep_shared_norms(launch_env, script, extra_env, cli, task):
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / script), *cli],
+        env={**launch_env, **extra_env},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in Path(launch_env["LAUNCH_LOG"]).read_text().splitlines()]
+    assert len(calls) == 3
+    # Both tasks intentionally reuse the existing full-dataset absolute norms.
+    for args in calls[:2]:
+        assert args[0] == "scripts/compute_lingdong_norm_stats.py"
+        assert args[args.index("--action-representation") + 1] == "absolute"
+        assert "--task" not in args
+    name = policy.SINGLE_TASK_CROP_CONFIGS[task]
+    assert calls[2][:2] == ["scripts/train.py", name]
+    parsed = tyro.extras.overridable_config_cli({name: (name, config.get_config(name))}, args=calls[2][1:])
+    assert parsed.data.task == task
+    assert parsed.data.crop_head
+    assert parsed.data.action_representation == "absolute"
+    assert parsed.model.action_horizon == 30
+
+
+@pytest.mark.parametrize(
+    "extra_env",
+    [
+        {"ACTION_REPRESENTATION": "bad"},
+        {"ACTION_HORIZON": "0"},
+        {"TASK": "unknown"},
+        {"TASK": "pick_up", "ACTION_REPRESENTATION": "relative"},
+    ],
+)
 def test_invalid_action_settings_fail_before_python(launch_env, extra_env):
     result = subprocess.run(
         ["bash", str(ROOT / "scripts/train_pi05_lingdong_right_arm.sh")],
