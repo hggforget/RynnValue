@@ -32,19 +32,23 @@ POLICY_CONFIG=pi05_lingdong_right_arm_crop CHECKPOINT=/path/to/crop/checkpoint \
 
 The serving launcher's default checkpoint is an earlier full-frame model and therefore still defaults to the original full-frame config. The cropped absolute config also supports `INFERENCE_MODE=rtc`.
 
-Two single-task presets use the same final dataset and select complete episodes by their canonical task in `meta/episodes.jsonl`. They preserve original episode/frame indices, so chunk boundaries, gripper events and scene prompts stay aligned. Sampling is uniform over the selected task's frames; mixed-task, incomplete or empty selections fail validation.
+Single-task presets support absolute and relative actions on the same final dataset, selecting complete episodes by their canonical task in `meta/episodes.jsonl`. They preserve original episode/frame indices, so chunk boundaries, gripper events and scene prompts stay aligned. Sampling is uniform over the selected task's frames; mixed-task, incomplete or empty selections fail validation.
 
-| Task | Config | Episodes | Frames |
-|---|---|---:|---:|
-| Pick up | `pi05_lingdong_right_arm_pick_up_crop` | 1,474 | 487,262 |
-| Put down | `pi05_lingdong_right_arm_put_down_crop` | 1,315 | 359,911 |
+| Task | Absolute config | Relative config | Episodes | Frames |
+|---|---|---|---:|---:|
+| Pick up | `pi05_lingdong_right_arm_pick_up_crop` | `pi05_lingdong_right_arm_pick_up_relative_crop` | 1,474 | 487,262 |
+| Put down | `pi05_lingdong_right_arm_put_down_crop` | `pi05_lingdong_right_arm_put_down_relative_crop` | 1,315 | 359,911 |
 
-Both inherit the absolute-action crop baseline: 30-frame chunks at 30 FPS, binary gripper commands, unchanged prompt augmentation, state input and SFT hyperparameters. They deliberately share the baseline's full-dataset normalization and scene-language assets in `assets/pi05_lingdong_right_arm/lingdong_right_arm/`, isolating task sampling in this comparison. Each config writes to its own checkpoint directory. The launchers run the usual full-dataset normalization preflight; these two presets use absolute actions.
+Each preset inherits its action representation's joint-task crop baseline: 30-frame chunks at 30 FPS, binary gripper commands, unchanged prompt augmentation, state input and SFT hyperparameters. Absolute presets share the full-dataset normalization in `assets/pi05_lingdong_right_arm/lingdong_right_arm/`; relative presets share the joint relative normalization in `assets/pi05_lingdong_right_arm_relative/lingdong_right_arm_relative/`. Both reuse the validated scene-language assets, isolating task sampling in this comparison. Each config writes to its own checkpoint directory. The launchers validate full-dataset normalization for the selected action representation.
 
 ```bash
 # Run from pi-rl; each command starts an independent training experiment.
 bash scripts/train_pi05_lingdong_right_arm_pick_up.sh
 bash scripts/train_pi05_lingdong_right_arm_put_down.sh
+
+# Relative actions with the same single-task episode selections.
+ACTION_REPRESENTATION=relative bash scripts/train_pi05_lingdong_right_arm_pick_up.sh
+ACTION_REPRESENTATION=relative bash scripts/train_pi05_lingdong_right_arm_put_down.sh
 
 # Equivalent task switches on the existing launcher; all is still the default.
 TASK=pick_up bash scripts/train_pi05_lingdong_right_arm.sh
@@ -167,7 +171,7 @@ For direct RPC integration, an RTC request adds `rtc={"previous_actions": pendin
 
 ### Lingdong offline IQL
 
-`scripts/train_iql_lingdong_right_arm.sh` runs the existing IQL critic/value learner and advantage-weighted flow-matching policy update on Lingdong data. Available configs are `pi05_lingdong_right_arm_crop_iql` (both tasks), `pi05_lingdong_right_arm_pick_up_crop_iql`, `pi05_lingdong_right_arm_put_down_crop_iql`, and `pi05_lingdong_right_arm_relative_crop_iql` (relative actions, both tasks). The same canonical episode filters, head crop, corrected right wrist, continuous measured state, binary whole-episode gripper labels and normalization assets are reused from SFT.
+`scripts/train_iql_lingdong_right_arm.sh` runs the existing IQL critic/value learner and advantage-weighted flow-matching policy update on Lingdong data. Every Lingdong crop SFT config has a matching `<config>_iql` variant, including both action representations and the pick-up/put-down single-task presets. The same canonical episode filters, head crop, corrected right wrist, continuous measured state, binary whole-episode gripper labels and normalization assets are reused from SFT.
 
 The critic consumes both cameras, the eight measured physical channels and a two-way canonical task indicator; its actions contain only the eight physical channels. The policy still uses the pretrained padded 32-D action layout and augmented text instructions. Current/next observations use `t` and `min(t+H,T-1)` from the same original episode. The bootstrap mask is zero when `t+H >= T-1`, including an exact terminal endpoint. At an already terminal frame, reward is zero and there is no bootstrap.
 
@@ -243,6 +247,10 @@ bash submit_to_nebula_lingdong.sh --method sft --task all \
 
 # Full single-task SFT (20,000 steps by default).
 bash submit_to_nebula_lingdong.sh --task pick_up
+
+# Relative-action single-task SFT, one independent job per command.
+bash submit_to_nebula_lingdong.sh --task pick_up --action-representation relative
+bash submit_to_nebula_lingdong.sh --task put_down --action-representation relative
 
 # IQL requires reward labels accessible at the same OSS path on the worker.
 bash submit_to_nebula_lingdong.sh --method iql --task pick_up \

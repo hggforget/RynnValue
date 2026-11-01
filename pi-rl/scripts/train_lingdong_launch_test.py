@@ -137,10 +137,13 @@ def test_relative_dry_run_does_not_launch_python(launch_env):
         ("train_pi05_lingdong_right_arm.sh", {}, ["--data.task=put_down"], "put_down"),
     ],
 )
-def test_single_task_launchers_select_matching_config_and_keep_shared_norms(launch_env, script, extra_env, cli, task):
+@pytest.mark.parametrize("representation", ["absolute", "relative"])
+def test_single_task_launchers_select_matching_config_and_keep_shared_norms(
+    launch_env, script, extra_env, cli, task, representation
+):
     result = subprocess.run(
         ["bash", str(ROOT / "scripts" / script), *cli],
-        env={**launch_env, **extra_env},
+        env={**launch_env, **extra_env, "ACTION_REPRESENTATION": representation},
         capture_output=True,
         text=True,
         check=False,
@@ -149,27 +152,30 @@ def test_single_task_launchers_select_matching_config_and_keep_shared_norms(laun
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in Path(launch_env["LAUNCH_LOG"]).read_text().splitlines()]
     assert len(calls) == 3
-    # Both tasks intentionally reuse the existing full-dataset absolute norms.
+    # Both tasks reuse the full-dataset norms for their action representation.
     for args in calls[:2]:
         assert args[0] == "scripts/compute_lingdong_norm_stats.py"
-        assert args[args.index("--action-representation") + 1] == "absolute"
+        assert args[args.index("--action-representation") + 1] == representation
         assert "--task" not in args
-    name = policy.SINGLE_TASK_CROP_CONFIGS[task]
+    names = policy.SINGLE_TASK_RELATIVE_CROP_CONFIGS if representation == "relative" else policy.SINGLE_TASK_CROP_CONFIGS
+    name = names[task]
     assert calls[2][:2] == ["scripts/train.py", name]
     parsed = tyro.extras.overridable_config_cli({name: (name, config.get_config(name))}, args=calls[2][1:])
     assert parsed.data.task == task
     assert parsed.data.crop_head
-    assert parsed.data.action_representation == "absolute"
+    assert parsed.data.action_representation == representation
     assert parsed.model.action_horizon == 30
 
 
 @pytest.mark.parametrize("task", ["all", "pick_up", "put_down"])
 @pytest.mark.parametrize("reward_source", ["progress", "terminal"])
-def test_iql_launch_checks_rewards_before_norms_and_passes_matching_flags(launch_env, task, reward_source):
+@pytest.mark.parametrize("representation", ["absolute", "relative"])
+def test_iql_launch_checks_rewards_before_norms_and_passes_matching_flags(launch_env, task, reward_source, representation):
     labels = str(Path(launch_env["DATA_ROOT"]).parent / "reward labels.json")
     result = subprocess.run(
         ["bash", str(ROOT / "scripts/train_iql_lingdong_right_arm.sh")],
-        env={**launch_env, "TASK": task, "REWARD_SOURCE": reward_source, "REWARD_LABELS_PATH": labels,
+        env={**launch_env, "TASK": task, "ACTION_REPRESENTATION": representation,
+             "REWARD_SOURCE": reward_source, "REWARD_LABELS_PATH": labels,
              "ASSUME_SUCCESS": "1" if reward_source == "terminal" else "0"},
         capture_output=True, text=True, check=False, timeout=10,
     )
@@ -182,11 +188,14 @@ def test_iql_launch_checks_rewards_before_norms_and_passes_matching_flags(launch
     assert calls[0][calls[0].index("--reward-labels-path") + 1] == labels
     assert ("--assume-success" in calls[0]) == (reward_source == "terminal")
     assert all(args[0] == "scripts/compute_lingdong_norm_stats.py" for args in calls[1:3])
-    base = policy.CROP_CONFIG_NAME if task == "all" else policy.SINGLE_TASK_CROP_CONFIGS[task]
+    names = policy.SINGLE_TASK_RELATIVE_CROP_CONFIGS if representation == "relative" else policy.SINGLE_TASK_CROP_CONFIGS
+    joint = policy.RELATIVE_CROP_CONFIG_NAME if representation == "relative" else policy.CROP_CONFIG_NAME
+    base = joint if task == "all" else names[task]
     name = f"{base}_iql"
     assert calls[3][:2] == ["scripts/train_iql.py", name]
     parsed = tyro.extras.overridable_config_cli({name: (name, config.get_config(name))}, args=calls[3][1:])
     assert parsed.data.task == task
+    assert parsed.data.action_representation == representation
     assert parsed.data.reward_labels_path == labels
     assert parsed.data.reward_source == reward_source
     assert parsed.data.assume_success == (reward_source == "terminal")
@@ -213,7 +222,6 @@ def test_iql_reward_cli_overrides_match_the_preflight_and_dry_run(launch_env):
         {"ACTION_REPRESENTATION": "bad"},
         {"ACTION_HORIZON": "0"},
         {"TASK": "unknown"},
-        {"TASK": "pick_up", "ACTION_REPRESENTATION": "relative"},
         {"METHOD": "unknown"},
         {"METHOD": "iql", "REWARD_SOURCE": "fake"},
         {"METHOD": "iql", "ASSUME_SUCCESS": "yes"},

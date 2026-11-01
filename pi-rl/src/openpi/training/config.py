@@ -4339,7 +4339,7 @@ _CONFIGS += [
     if config.name in (lingdong_policy.CONFIG_NAME, lingdong_policy.RELATIVE_CONFIG_NAME)
 ]
 
-# Single-task ablations change only episode sampling. They reuse the absolute
+# Single-task ablations change only episode sampling. They reuse the matching
 # crop preset's normalization/language assets and keep separate checkpoints.
 _CONFIGS += [
     dataclasses.replace(
@@ -4353,8 +4353,12 @@ _CONFIGS += [
         },
     )
     for config in _CONFIGS
-    if config.name == lingdong_policy.CROP_CONFIG_NAME
-    for task, name in lingdong_policy.SINGLE_TASK_CROP_CONFIGS.items()
+    if config.name in (lingdong_policy.CROP_CONFIG_NAME, lingdong_policy.RELATIVE_CROP_CONFIG_NAME)
+    for task, name in (
+        lingdong_policy.SINGLE_TASK_RELATIVE_CROP_CONFIGS
+        if config.data.action_representation == "relative"
+        else lingdong_policy.SINGLE_TASK_CROP_CONFIGS
+    ).items()
 ]
 
 # Lingdong IQL shares SFT preprocessing/norms and retains its selected task episodes.
@@ -4381,6 +4385,7 @@ _CONFIGS += [
     if config.name in (
         lingdong_policy.CROP_CONFIG_NAME, lingdong_policy.RELATIVE_CROP_CONFIG_NAME,
         *lingdong_policy.SINGLE_TASK_CROP_CONFIGS.values(),
+        *lingdong_policy.SINGLE_TASK_RELATIVE_CROP_CONFIGS.values(),
     )
 ]
 

@@ -91,12 +91,12 @@ esac
 case "$TASK" in
     all) ;;
     pick_up|put_down)
-        if [[ "$ACTION_REPRESENTATION" != absolute ]]; then
-            echo "Single-task presets use absolute actions; set ACTION_REPRESENTATION=absolute." >&2
-            exit 1
-        fi
         CONFIG="pi05_lingdong_right_arm_${TASK}_crop"
         EXP_PREFIX="lingdong_right_arm_${TASK}_crop"
+        if [[ "$ACTION_REPRESENTATION" == relative ]]; then
+            CONFIG="pi05_lingdong_right_arm_${TASK}_relative_crop"
+            EXP_PREFIX="lingdong_right_arm_${TASK}_relative_crop"
+        fi
         ;;
     *) echo "TASK must be all, pick_up or put_down." >&2; exit 1 ;;
 esac

@@ -149,8 +149,6 @@ def main():
     args = parser.parse_args()
     if args.batch_size_per_gpu < 1 or args.num_train_steps < 1 or args.num_workers < 0:
         parser.error("Batch size and steps must be positive; workers must be nonnegative.")
-    if args.task != "all" and args.action_representation != "absolute":
-        parser.error("Single-task presets require absolute actions.")
     if (
         args.method == "iql"
         and not args.reward_labels_path

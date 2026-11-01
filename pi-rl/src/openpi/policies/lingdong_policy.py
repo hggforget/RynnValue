@@ -18,6 +18,10 @@ SINGLE_TASK_CROP_CONFIGS = {
     "pick_up": "pi05_lingdong_right_arm_pick_up_crop",
     "put_down": "pi05_lingdong_right_arm_put_down_crop",
 }
+SINGLE_TASK_RELATIVE_CROP_CONFIGS = {
+    "pick_up": "pi05_lingdong_right_arm_pick_up_relative_crop",
+    "put_down": "pi05_lingdong_right_arm_put_down_relative_crop",
+}
 TASK_PROMPTS = {"pick_up": "pick up the object", "put_down": "put down the object"}
 DEFAULT_DATASET_ROOT = "/mnt/rynnbot_hangzhou/hdc/pku/datasets/lingdong"
 DATASET_NAMES = ("lerobot_2026-10-26_12-09-32_final",)

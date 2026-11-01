@@ -164,16 +164,19 @@ def task_dataset(tmp_path):
 
 
 @pytest.mark.parametrize(("task", "expected"), [("pick_up", (1, 3)), ("put_down", (0, 2))])
+@pytest.mark.parametrize("representation", ["absolute", "relative"])
 def test_single_task_presets_select_original_episodes_and_reuse_baseline_assets(
-    task_dataset, monkeypatch, task, expected
+    task_dataset, monkeypatch, task, expected, representation
 ):
     repo, rows = task_dataset
     monkeypatch.setattr(config.ModelTransformFactory, "__call__", lambda self, model: transforms.Group())
-    preset = config.get_config(policy.SINGLE_TASK_CROP_CONFIGS[task])
-    baseline = config.get_config(policy.CROP_CONFIG_NAME)
+    names = policy.SINGLE_TASK_RELATIVE_CROP_CONFIGS if representation == "relative" else policy.SINGLE_TASK_CROP_CONFIGS
+    preset = config.get_config(names[task])
+    baseline = config.get_config(policy.RELATIVE_CROP_CONFIG_NAME if representation == "relative" else policy.CROP_CONFIG_NAME)
     factory = dataclasses.replace(
         preset.data, dataset_root=str(repo.parent),
         assets=dataclasses.replace(preset.data.assets, assets_dir=str(repo.parent / "assets")),
+        scene_prompts_path=str(repo.parent / "assets" / policy.ASSET_ID / lingdong_language.ASSET_NAME),
     )
     data = factory.create(preset.assets_dirs, preset.model)
     assert data.episode_ids == {str(repo): expected}
@@ -184,6 +187,10 @@ def test_single_task_presets_select_original_episodes_and_reuse_baseline_assets(
     assert preset.model == baseline.model
     assert preset.lr_schedule == baseline.lr_schedule
     assert preset.data.crop_head
+    assert preset.data.action_representation == representation
+    assert any(isinstance(t, transforms.DeltaActions) for t in data.data_transforms.inputs) == (representation == "relative")
+    assert any(isinstance(t, transforms.AbsoluteActions) for t in data.data_transforms.outputs) == (representation == "relative")
+    assert preset.policy_metadata["action_representation"] == baseline.policy_metadata["action_representation"]
     assert preset.policy_metadata["head_crop_xyxy"] == baseline.policy_metadata["head_crop_xyxy"]
     assert preset.policy_metadata["task"] == task
     assert preset.policy_metadata["task_prompt"] == policy.TASK_PROMPTS[task]
@@ -203,9 +210,13 @@ def test_task_selections_partition_the_final_dataset_without_reindexing(task_dat
 
 
 @pytest.mark.parametrize("task", ["pick_up", "put_down"])
-def test_single_task_serving_allows_unmounted_data_but_mounted_missing_metadata_fails(tmp_path, monkeypatch, task):
+@pytest.mark.parametrize("representation", ["absolute", "relative"])
+def test_single_task_serving_allows_unmounted_data_but_mounted_missing_metadata_fails(
+    tmp_path, monkeypatch, task, representation
+):
     monkeypatch.setattr(config.ModelTransformFactory, "__call__", lambda self, model: transforms.Group())
-    preset = config.get_config(policy.SINGLE_TASK_CROP_CONFIGS[task])
+    names = policy.SINGLE_TASK_RELATIVE_CROP_CONFIGS if representation == "relative" else policy.SINGLE_TASK_CROP_CONFIGS
+    preset = config.get_config(names[task])
     factory = dataclasses.replace(preset.data, dataset_root=str(tmp_path))
     assert factory.create(preset.assets_dirs, preset.model).episode_ids is None
     meta = tmp_path / policy.DATASET_NAMES[0] / "meta"

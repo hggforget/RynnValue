@@ -148,9 +148,12 @@ def test_reward_sidecar_rejects_stale_or_invalid_labels(reward_dataset, failure)
 
 
 @pytest.mark.parametrize("task", ["all", "pick_up", "put_down"])
-def test_iql_presets_preserve_task_filters_gripper_labels_and_sft_assets(reward_dataset, monkeypatch, task):
+@pytest.mark.parametrize("representation", ["absolute", "relative"])
+def test_iql_presets_preserve_task_filters_gripper_labels_and_sft_assets(reward_dataset, monkeypatch, task, representation):
     repo, path, _ = reward_dataset
-    name = policy.CROP_CONFIG_NAME if task == "all" else policy.SINGLE_TASK_CROP_CONFIGS[task]
+    names = policy.SINGLE_TASK_RELATIVE_CROP_CONFIGS if representation == "relative" else policy.SINGLE_TASK_CROP_CONFIGS
+    joint = policy.RELATIVE_CROP_CONFIG_NAME if representation == "relative" else policy.CROP_CONFIG_NAME
+    name = joint if task == "all" else names[task]
     preset = config.get_config(f"{name}_iql")
     monkeypatch.setattr(config.ModelTransformFactory, "__call__", lambda self, model: transforms.Group())
     factory = dataclasses.replace(
@@ -164,6 +167,7 @@ def test_iql_presets_preserve_task_filters_gripper_labels_and_sft_assets(reward_
     assert data.repo_id == str(repo)
     assert data.episode_ids == {"all": (0, 1, 2), "pick_up": (1,), "put_down": (0, 2)}[task]
     assert data.asset_id == config.get_config(name).data.assets.asset_id
+    assert preset.data.action_representation == representation
     assert data.video_keys == policy.VIDEO_KEYS
     assert data.extra_delta_timestamps["observation.state"] == (0.0, 1.0)
     assert "progress" not in data.extra_delta_timestamps  # The sidecar supplies it.
