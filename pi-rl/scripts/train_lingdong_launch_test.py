@@ -32,7 +32,10 @@ def launch_env(tmp_path):
     )
     fake_python.chmod(0o755)
     env = dict(os.environ)
-    for key in ("INIT_CHECKPOINT", "ACTION_REPRESENTATION", "ACTION_HORIZON", "TASK", "BATCH_SIZE", "SKIP_NORM", "DRY_RUN"):
+    for key in (
+        "INIT_CHECKPOINT", "ACTION_REPRESENTATION", "ACTION_HORIZON", "TASK", "BATCH_SIZE", "SKIP_NORM", "DRY_RUN",
+        "METHOD", "REWARD_SOURCE", "REWARD_LABELS_PATH", "ASSUME_SUCCESS",
+    ):
         env.pop(key, None)
     env.update(
         PYTHON=str(fake_python),
@@ -160,6 +163,50 @@ def test_single_task_launchers_select_matching_config_and_keep_shared_norms(laun
     assert parsed.model.action_horizon == 30
 
 
+@pytest.mark.parametrize("task", ["all", "pick_up", "put_down"])
+@pytest.mark.parametrize("reward_source", ["progress", "terminal"])
+def test_iql_launch_checks_rewards_before_norms_and_passes_matching_flags(launch_env, task, reward_source):
+    labels = str(Path(launch_env["DATA_ROOT"]).parent / "reward labels.json")
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/train_iql_lingdong_right_arm.sh")],
+        env={**launch_env, "TASK": task, "REWARD_SOURCE": reward_source, "REWARD_LABELS_PATH": labels,
+             "ASSUME_SUCCESS": "1" if reward_source == "terminal" else "0"},
+        capture_output=True, text=True, check=False, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in Path(launch_env["LAUNCH_LOG"]).read_text().splitlines()]
+    assert len(calls) == 4
+    assert calls[0][0] == "scripts/check_lingdong_iql_data.py"
+    assert calls[0][calls[0].index("--task") + 1] == task
+    assert calls[0][calls[0].index("--reward-source") + 1] == reward_source
+    assert calls[0][calls[0].index("--reward-labels-path") + 1] == labels
+    assert ("--assume-success" in calls[0]) == (reward_source == "terminal")
+    assert all(args[0] == "scripts/compute_lingdong_norm_stats.py" for args in calls[1:3])
+    base = policy.CROP_CONFIG_NAME if task == "all" else policy.SINGLE_TASK_CROP_CONFIGS[task]
+    name = f"{base}_iql"
+    assert calls[3][:2] == ["scripts/train_iql.py", name]
+    parsed = tyro.extras.overridable_config_cli({name: (name, config.get_config(name))}, args=calls[3][1:])
+    assert parsed.data.task == task
+    assert parsed.data.reward_labels_path == labels
+    assert parsed.data.reward_source == reward_source
+    assert parsed.data.assume_success == (reward_source == "terminal")
+    assert parsed.iql.proprio_key == "iql_state"
+
+
+def test_iql_reward_cli_overrides_match_the_preflight_and_dry_run(launch_env):
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/train_iql_lingdong_right_arm.sh"),
+         "--data.reward-source=terminal", "--data.assume-success"],
+        env={**launch_env, "DRY_RUN": "1"},
+        capture_output=True, text=True, check=False, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    args = shlex.split(result.stdout.splitlines()[-1])
+    assert args[1:3] == ["scripts/train_iql.py", f"{policy.CROP_CONFIG_NAME}_iql"]
+    assert "--data.assume-success" in args
+    assert not Path(launch_env["LAUNCH_LOG"]).exists()
+
+
 @pytest.mark.parametrize(
     "extra_env",
     [
@@ -167,6 +214,9 @@ def test_single_task_launchers_select_matching_config_and_keep_shared_norms(laun
         {"ACTION_HORIZON": "0"},
         {"TASK": "unknown"},
         {"TASK": "pick_up", "ACTION_REPRESENTATION": "relative"},
+        {"METHOD": "unknown"},
+        {"METHOD": "iql", "REWARD_SOURCE": "fake"},
+        {"METHOD": "iql", "ASSUME_SUCCESS": "yes"},
     ],
 )
 def test_invalid_action_settings_fail_before_python(launch_env, extra_env):
@@ -179,4 +229,63 @@ def test_invalid_action_settings_fail_before_python(launch_env, extra_env):
         timeout=10,
     )
     assert result.returncode != 0
+    assert not Path(launch_env["LAUNCH_LOG"]).exists()
+
+
+@pytest.mark.parametrize(
+    ("script", "settings"),
+    [
+        ("train_pi05_lingdong_right_arm.sh", {}),
+        ("train_pi05_lingdong_right_arm_relative.sh", {}),
+        ("train_pi05_lingdong_right_arm_pick_up.sh", {}),
+        ("train_pi05_lingdong_right_arm_put_down.sh", {}),
+        ("train_iql_lingdong_right_arm.sh", {}),
+        ("train_iql_lingdong_right_arm.sh", {"TASK": "pick_up"}),
+        ("train_iql_lingdong_right_arm.sh", {"TASK": "put_down"}),
+        ("train_iql_lingdong_right_arm.sh", {"ACTION_REPRESENTATION": "relative"}),
+    ],
+)
+@pytest.mark.parametrize(("visible", "expected_gpus"), [(None, 4), ("3,5", 2), ("GPU-test-uuid", 1)])
+def test_all_task_launchers_detect_visible_gpus(launch_env, tmp_path, script, settings, visible, expected_gpus):
+    env = {**launch_env, **settings, "DRY_RUN": "1"}
+    for name in ("GPUS", "FSDP_DEVICES", "BATCH_SIZE", "CUDA_VISIBLE_DEVICES"):
+        env.pop(name, None)
+    # A visibility mask must win over the four physical GPUs reported by NVML.
+    nvidia = tmp_path / "nvidia-smi"
+    nvidia.write_text("#!/bin/sh\nprintf 'GPU 0: fake\\nGPU 1: fake\\nGPU 2: fake\\nGPU 3: fake\\n'\n")
+    nvidia.chmod(0o755)
+    env["PATH"] = f"{tmp_path}:{env['PATH']}"
+    if visible is not None:
+        env["CUDA_VISIBLE_DEVICES"] = visible
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / script)],
+        env=env, capture_output=True, text=True, check=False, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    command = shlex.split(result.stdout.splitlines()[-1])
+    assert command[command.index("--fsdp-devices") + 1] == str(expected_gpus)
+    assert command[command.index("--batch-size") + 1] == str(16 * expected_gpus)
+    assert f"GPUs={visible or '0,1,2,3'}," in result.stdout
+    assert not Path(launch_env["LAUNCH_LOG"]).exists()
+
+
+def test_lingdong_rejects_mismatched_fsdp(launch_env):
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/train_pi05_lingdong_right_arm.sh"), "--fsdp-devices", "1"],
+        env={**launch_env, "DRY_RUN": "1"}, capture_output=True, text=True, check=False, timeout=10,
+    )
+    assert result.returncode != 0
+    assert "FSDP must match the detected GPU count: 2" in result.stderr
+
+
+@pytest.mark.parametrize("visible", ["", "-1"])
+def test_no_visible_gpus_fails_before_training(launch_env, visible):
+    env = {**launch_env, "CUDA_VISIBLE_DEVICES": visible, "DRY_RUN": "1"}
+    env.pop("GPUS", None)
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/train_pi05_lingdong_right_arm.sh")],
+        env=env, capture_output=True, text=True, check=False, timeout=10,
+    )
+    assert result.returncode != 0
+    assert "No usable GPUs" in result.stderr
     assert not Path(launch_env["LAUNCH_LOG"]).exists()

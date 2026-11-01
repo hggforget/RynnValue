@@ -49,6 +49,8 @@ def read_video(path, frames, timestamps, length):
 
 
 def load_episode(root, info, episode, frame_step, video_keys, action_indices):
+    from openpi.policies import lingdong_policy
+
     index = episode['episode_index']
     fields = {'episode_index': index, 'episode_chunk': index // info['chunks_size']}
     table = pq.read_table(root / info['data_path'].format(**fields))
@@ -59,7 +61,9 @@ def load_episode(root, info, episode, frame_step, video_keys, action_indices):
         raise ValueError(f'Non-increasing timestamps in episode {index}')
     frames = np.unique(np.r_[np.arange(0, len(table), frame_step), len(table) - 1]).astype(np.int64)
     state = np.asarray(table['observation.state'].to_pylist(), dtype=np.float32)
-    gt = np.asarray(table['action'].to_pylist(), dtype=np.float32)[:, action_indices]
+    raw_gt = np.asarray(table['action'].to_pylist(), dtype=np.float32)[:, action_indices]
+    # Training labels depend on the complete episode, including future reversals.
+    gt = lingdong_policy.binarize_gripper_actions(raw_gt)
     if not np.isfinite(state).all() or not np.isfinite(gt).all():
         raise ValueError(f'Nonfinite recorded state/action in episode {index}')
     task_indices = np.asarray(table['task_index'].to_pylist(), dtype=np.int64)
@@ -68,7 +72,7 @@ def load_episode(root, info, episode, frame_step, video_keys, action_indices):
     images = {key: read_video(root / info['video_path'].format(**fields, video_key=key),
                               frames, timestamps, len(table)) for key in video_keys}
     log('episode_decoded', episode=index, frames=len(table), requests=len(frames), task=episode['tasks'][0])
-    return {'frames': frames, 'timestamps': timestamps, 'state': state, 'gt': gt,
+    return {'frames': frames, 'timestamps': timestamps, 'state': state, 'gt': gt, 'raw_gt': raw_gt,
             'task_indices': task_indices, 'tasks': tasks, 'images': images}
 
 
@@ -172,6 +176,8 @@ def collect(args):
         'comparison': 'Prediction[t, 0, :] versus recorded action[t, :]; all observations are recorded dataset observations.',
         'noise': 'One fixed seeded Gaussian noise tensor is reused across observations to control sampling variability.',
         'scope': 'Offline fitting on samples from the training dataset; no closed-loop robot execution.',
+        'gripper_target': lingdong_policy.gripper_binarization_spec(),
+        'checkpoint_step': args.checkpoint.name,
         'norm_stats_sha256': hashlib.sha256((args.checkpoint / 'assets/lingdong_right_arm/norm_stats.json').read_bytes()).hexdigest(),
         'episode_ids': [episode['episode_index'] for episode in episodes],
     }
@@ -195,6 +201,7 @@ def collect(args):
         np.savez_compressed(
             args.output / f'episode_{index:06d}.npz', frames=loaded['frames'],
             timestamps=loaded['timestamps'], gt=loaded['gt'], predictions=np.stack(chunks),
+            raw_gt=loaded['raw_gt'],
             right_state=loaded['state'][:, state_indices],
             inference_ms=np.asarray(timings), task=np.asarray(episode['tasks'][0]),
         )
@@ -214,6 +221,17 @@ def metrics_for(records):
     result = {'requests': len(errors), 'mae': np.abs(errors).mean(axis=0).tolist(),
             'rmse': np.sqrt(np.mean(errors ** 2, axis=0)).tolist(),
             'horizon_mae': (sums / counts[:, None]).tolist(), 'horizon_valid_requests': counts.tolist()}
+    predictions = np.concatenate([record['predictions'][:, 0, :] for record in records])
+    targets = np.concatenate([record['gt'][record['frames']] for record in records])
+    result['joint_mae'] = float(np.abs(errors[:, :7]).mean())
+    result['joint_rmse'] = float(np.sqrt(np.mean(errors[:, :7] ** 2)))
+    result['gripper_accuracy'] = float(np.mean((predictions[:, 7] >= 0.5) == (targets[:, 7] >= 0.5)))
+    result['gripper_confusion'] = {
+        'true_closed_predicted_closed': int(np.sum((targets[:, 7] < 0.5) & (predictions[:, 7] < 0.5))),
+        'true_closed_predicted_open': int(np.sum((targets[:, 7] < 0.5) & (predictions[:, 7] >= 0.5))),
+        'true_open_predicted_closed': int(np.sum((targets[:, 7] >= 0.5) & (predictions[:, 7] < 0.5))),
+        'true_open_predicted_open': int(np.sum((targets[:, 7] >= 0.5) & (predictions[:, 7] >= 0.5))),
+    }
     if all('right_state' in record for record in records):
         baseline = np.concatenate([record['right_state'][record['frames']] - record['gt'][record['frames']]
                                    for record in records])
@@ -224,8 +242,18 @@ def metrics_for(records):
         result['state_copy_baseline'] = {
             'description': 'Predict the current recorded right-arm state at every horizon.',
             'first_step_mae': np.abs(baseline).mean(axis=0).tolist(),
+            'first_step_joint_mae': float(np.abs(baseline[:, :7]).mean()),
             'horizon29_mae': np.abs(np.concatenate(future)).mean(axis=0).tolist(),
         }
+        horizon_baseline = np.zeros_like(sums)
+        for record in records:
+            for offset in range(30):
+                targets = record['frames'] + offset
+                valid = targets < len(record['gt'])
+                horizon_baseline[offset] += np.abs(
+                    record['right_state'][record['frames'][valid]] - record['gt'][targets[valid]]
+                ).sum(axis=0)
+        result['state_copy_baseline']['horizon_mae'] = (horizon_baseline / counts[:, None]).tolist()
     return result
 
 
@@ -244,6 +272,7 @@ def plot(args):
         record['task'] = str(record['task'])
         records.append(record)
     channels = metadata['channels']
+    step = metadata.get('checkpoint_step', Path(metadata['checkpoint']).name)
     short_names = [name.replace('_Joint', '') for name in channels]
     plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 10,
                          'axes.spines.top': False, 'axes.spines.right': False,
@@ -254,14 +283,19 @@ def plot(args):
         gt = record['gt'][:, channel]
         prediction = record['predictions'][:, 0, channel]
         mae = float(np.abs(prediction - gt[frames]).mean())
-        axis.plot(record['timestamps'], gt, color='#334155', linewidth=1.7, label='GT action')
+        if channel == 7 and 'raw_gt' in record:
+            axis.plot(record['timestamps'], record['raw_gt'][:, channel], color='#94a3b8',
+                      linewidth=1, linestyle=':', label='Raw gripper (before training labels)')
+        axis.plot(record['timestamps'], gt, color='#334155', linewidth=1.7, label='Training GT action')
         axis.plot(record['timestamps'][frames], prediction, color='#ea580c', linewidth=1.2,
                   marker='.', markersize=2.5, alpha=0.9, label='Pi0.5 prediction (first step)')
         axis.set_title(f'{short_names[channel]}   |   MAE {mae:.4g}', loc='left', fontsize=11)
-        axis.set_ylabel('Recorded gripper target' if channel == 7 else 'Recorded joint target')
+        axis.set_ylabel('Gripper command (0 closed / 1 open)' if channel == 7 else 'Joint target (dataset units)')
         axis.set_xlabel('Episode time (s)')
         axis.grid(alpha=0.18)
         axis.set_xlim(record['timestamps'][0], record['timestamps'][-1])
+        if channel == 7 and 'raw_gt' in record:
+            axis.legend(fontsize=7, loc='best')
 
     pdf_path = args.output / 'action_comparison.pdf'
     with PdfPages(pdf_path) as pdf:
@@ -274,7 +308,7 @@ def plot(args):
                 panel(axes[channel, column], record, channel)
             axes[0, column].set_title(f"Episode {record['episode']} | {record['task']}\n" +
                                       axes[0, column].get_title(loc='left'), loc='left', fontsize=12)
-        fig.suptitle('Lingdong Pi0.5 checkpoint 10000: predicted actions vs GT', x=0.06, ha='left', fontsize=20)
+        fig.suptitle(f'Lingdong Pi0.5 checkpoint {step}: predicted actions vs GT', x=0.06, ha='left', fontsize=20)
         fig.legend(*axes[0, 0].get_legend_handles_labels(), loc='upper right', bbox_to_anchor=(0.985, 0.978), ncol=2)
         fig.text(0.06, 0.954, f"Recorded observations; action chunk step 0 aligned to the same-frame GT; one request every {metadata['frame_step']} frames.", fontsize=10)
         fig.tight_layout(rect=(0.01, 0.015, 0.99, 0.94), h_pad=1.4, w_pad=2)
@@ -304,7 +338,7 @@ def plot(args):
                 if channel == 0:
                     title = f"Episode {record['episode']} | frame {anchor} | {record['task']}\n" + title
                 axis.set_title(title, loc='left', fontsize=11)
-                axis.set_ylabel('Recorded gripper target' if channel == 7 else 'Recorded joint target')
+                axis.set_ylabel('Gripper command (0 closed / 1 open)' if channel == 7 else 'Joint target (dataset units)')
                 axis.set_xlabel('Prediction horizon (s)')
                 axis.set_xlim(offsets[0], offsets[-1])
                 axis.grid(alpha=0.18)
@@ -312,7 +346,7 @@ def plot(args):
                 if np.ptp(np.r_[prediction[:, channel], reference[:, channel]]) < 0.02:
                     center = float(np.mean(reference[:, channel]))
                     axis.set_ylim(center - 0.02, center + 0.02)
-        fig.suptitle('Checkpoint 10000: a complete 30-step prediction vs future GT',
+        fig.suptitle(f'Checkpoint {step}: a complete 30-step prediction vs future GT',
                      x=0.06, ha='left', fontsize=20)
         fig.legend(*axes[0, 0].get_legend_handles_labels(), loc='upper right', bbox_to_anchor=(0.985, 0.978), ncol=2)
         fig.text(0.06, 0.954, 'One observation near the middle of each episode; all 30 future actions are predicted from that observation.', fontsize=10)
@@ -324,7 +358,7 @@ def plot(args):
             fig, axes = plt.subplots(4, 2, figsize=(16, 12))
             for channel, axis in enumerate(axes.flat):
                 panel(axis, record, channel)
-            fig.suptitle(f"Checkpoint 10000 | episode {record['episode']} | {record['task']}",
+            fig.suptitle(f"Checkpoint {step} | episode {record['episode']} | {record['task']}",
                          x=0.065, ha='left', fontsize=18)
             fig.legend(*axes[0, 0].get_legend_handles_labels(), loc='upper right', bbox_to_anchor=(0.98, 0.946), ncol=2)
             fig.text(0.065, 0.945, 'Offline recorded observations; raw action units; fixed sampling noise.', fontsize=10)
@@ -338,6 +372,44 @@ def plot(args):
                'episodes': {str(record['episode']): {'task': record['task'], **metrics_for([record])}
                             for record in records}}
     (args.output / 'metrics.json').write_text(json.dumps(summary, indent=2) + '\n')
+    overall = summary['overall']
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    positions = np.arange(7)
+    baseline = np.asarray(overall['state_copy_baseline']['first_step_mae'])
+    axes[0, 0].bar(positions - 0.18, np.asarray(overall['mae'])[:7], width=0.36, color='#ea580c', label='Pi0.5')
+    axes[0, 0].bar(positions + 0.18, baseline[:7], width=0.36, color='#94a3b8', label='Copy current state')
+    axes[0, 0].set_xticks(positions, short_names[:7], rotation=25, ha='right')
+    axes[0, 0].set_ylabel('First-step MAE (dataset units)')
+    axes[0, 0].set_title('Per-joint error; lower is better', loc='left')
+    axes[0, 0].legend()
+    horizons = np.arange(30) / metadata['fps']
+    horizon_mae = np.asarray(overall['horizon_mae'])
+    horizon_baseline = np.asarray(overall['state_copy_baseline']['horizon_mae'])
+    axes[0, 1].plot(horizons, horizon_mae[:, :7].mean(axis=1), color='#ea580c', label='Pi0.5')
+    axes[0, 1].plot(horizons, horizon_baseline[:, :7].mean(axis=1), color='#64748b', label='Copy current state')
+    axes[0, 1].set_title('Error across all 30 prediction steps', loc='left')
+    axes[0, 1].set_ylabel('Mean of 7 joint MAEs (dataset units)')
+    axes[0, 1].set_xlabel('Prediction horizon (s)')
+    axes[0, 1].legend()
+    for task, group in zip(('pick up the object', 'put down the object'), task_groups):
+        if group:
+            values = np.asarray(summary['tasks'][task]['horizon_mae'])
+            axes[1, 0].plot(horizons, values[:, :7].mean(axis=1), label=task)
+    axes[1, 0].set_title('Prediction error by task', loc='left')
+    axes[1, 0].set_ylabel('Mean of 7 joint MAEs (dataset units)')
+    axes[1, 0].set_xlabel('Prediction horizon (s)')
+    axes[1, 0].legend()
+    axes[1, 1].plot(horizons, horizon_mae[:, 7], color='#ea580c')
+    axes[1, 1].set_title(f"Gripper command error; first-step accuracy {overall['gripper_accuracy']:.1%}", loc='left')
+    axes[1, 1].set_ylabel('MAE against binary training target')
+    axes[1, 1].set_xlabel('Prediction horizon (s)')
+    for axis in axes.flat:
+        axis.grid(alpha=0.18)
+    fig.suptitle(f"Checkpoint {step} | {len(records)} episodes | {overall['requests']} recorded observations", fontsize=17)
+    fig.text(0.02, 0.01, 'Training-dataset sample; fixed noise; no closed-loop rollout. Final frames without future GT are excluded per horizon.', fontsize=10)
+    fig.tight_layout(rect=(0, 0.035, 1, 0.95), h_pad=2)
+    fig.savefig(args.output / 'error_summary.png', dpi=160, facecolor='white')
+    plt.close(fig)
     csv_path = args.output / 'first_step_comparison.csv'
     with csv_path.open('w') as output:
         header = ['episode', 'frame', 'time_seconds', *[f'gt_{name}' for name in channels],

@@ -252,6 +252,21 @@ def _resolve(batch: dict, path: str):
     return node
 
 
+def _critic_actions(actions: np.ndarray, action_dim: int | None) -> np.ndarray:
+    if action_dim is None:
+        return actions
+    if not 1 <= action_dim <= actions.shape[-1]:
+        raise ValueError("IQL action_dim must select valid physical action channels")
+    return actions[..., :action_dim]
+
+
+def _critic_proprio(batch: dict, key: str) -> np.ndarray:
+    values = np.asarray(jax.device_get(_resolve(batch, key)), dtype=np.float32)
+    if values.ndim != 2 or not np.isfinite(values).all():
+        raise ValueError("IQL critic conditioning must be finite [B, D]")
+    return values
+
+
 def _chunk_reward(
     batch: dict,
     step_reward_discount: float | None,
@@ -323,6 +338,9 @@ def _build_iql_view(
     next_image_keys: Sequence[str],
     step_reward_discount: float | None = None,
     progress_reward_weight: float = 1.0,
+    proprio_key: str | None = None,
+    next_proprio_key: str | None = None,
+    action_dim: int | None = None,
 ) -> dict:
     """Pull uint8 pixels + transitions out of the (sharded) batch dict onto the host.
 
@@ -335,10 +353,21 @@ def _build_iql_view(
     """
     cur_arrays = [np.asarray(jax.device_get(_resolve(batch, k))) for k in image_keys]
     nxt_arrays = [np.asarray(jax.device_get(_resolve(batch, k))) for k in next_image_keys]
+    observations = {"pixels": _stack_cameras(cur_arrays)}
+    next_observations = {"pixels": _stack_cameras(nxt_arrays)}
+    if (proprio_key is None) != (next_proprio_key is None):
+        raise ValueError("IQL proprio_key and next_proprio_key must be configured together")
+    if proprio_key is not None:
+        observations["proprio"] = _critic_proprio(batch, proprio_key)
+        next_observations["proprio"] = _critic_proprio(batch, next_proprio_key)
+        if observations["proprio"].shape != next_observations["proprio"].shape:
+            raise ValueError("IQL current/next critic conditioning shapes differ")
+        if observations["proprio"].shape[0] != cur_arrays[0].shape[0]:
+            raise ValueError("IQL pixel/conditioning batch sizes differ")
     return FrozenDict({
-        "observations": FrozenDict({"pixels": _stack_cameras(cur_arrays)}),
-        "next_observations": FrozenDict({"pixels": _stack_cameras(nxt_arrays)}),
-        "actions": np.asarray(jax.device_get(batch["actions"]), dtype=np.float32),
+        "observations": FrozenDict(observations),
+        "next_observations": FrozenDict(next_observations),
+        "actions": _critic_actions(np.asarray(jax.device_get(batch["actions"]), dtype=np.float32), action_dim),
         "rewards": _chunk_reward(batch, step_reward_discount, progress_reward_weight),
         "masks": np.asarray(jax.device_get(batch["mask"]), dtype=np.float32),
     })
@@ -351,6 +380,9 @@ def split_batch(
     next_image_keys: Sequence[str],
     step_reward_discount: float | None = None,
     progress_reward_weight: float = 1.0,
+    proprio_key: str | None = None,
+    next_proprio_key: str | None = None,
+    action_dim: int | None = None,
 ) -> tuple[_model.Observation, jax.Array, dict]:
     """Build pi0 Observation/Actions and IQL transition dict from one combined batch."""
     # Build IQL host view FIRST — Observation.from_dict mutates the image dict.
@@ -360,6 +392,9 @@ def split_batch(
         next_image_keys=next_image_keys,
         step_reward_discount=step_reward_discount,
         progress_reward_weight=progress_reward_weight,
+        proprio_key=proprio_key,
+        next_proprio_key=next_proprio_key,
+        action_dim=action_dim,
     )
 
     pi0_dict = {k: batch[k] for k in _PI0_KEYS if k in batch}
@@ -368,7 +403,9 @@ def split_batch(
     return pi0_obs, pi0_actions, iql_batch
 
 
-def host_sample_for_iql_init(batch: dict, *, image_keys: Sequence[str]) -> tuple[dict, np.ndarray]:
+def host_sample_for_iql_init(
+    batch: dict, *, image_keys: Sequence[str], proprio_key: str | None = None, action_dim: int | None = None
+) -> tuple[dict, np.ndarray]:
     """Build a single host-side sample (observations, actions) for PiIQLLearner.__init__.
 
     We slice on host AFTER device_get rather than on the sharded device array.
@@ -379,8 +416,11 @@ def host_sample_for_iql_init(batch: dict, *, image_keys: Sequence[str]) -> tuple
     here) and only the [:1] slice is retained afterwards.
     """
     cur_arrays = [np.asarray(jax.device_get(_resolve(batch, k)))[:1] for k in image_keys]
-    actions = np.asarray(jax.device_get(batch["actions"]), dtype=np.float32)[:1]
-    return FrozenDict({"pixels": _stack_cameras(cur_arrays)}), actions
+    actions = _critic_actions(np.asarray(jax.device_get(batch["actions"]), dtype=np.float32)[:1], action_dim)
+    observations = {"pixels": _stack_cameras(cur_arrays)}
+    if proprio_key is not None:
+        observations["proprio"] = _critic_proprio(batch, proprio_key)[:1]
+    return FrozenDict(observations), actions
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +471,7 @@ def _safe_histogram(arr: np.ndarray, num_bins: int = 64):
     return wandb.Histogram(a.astype(np.float32), num_bins=num_bins)
 
 
-def _build_distribution_logs(d: dict) -> dict:
+def _build_distribution_logs(d: dict, action_dim: int = 7) -> dict:
     """Per-step distribution snapshots for wandb (histograms)."""
     if not d:
         return {}
@@ -482,7 +522,7 @@ def _build_distribution_logs(d: dict) -> dict:
 
     actions = d.get("actions")  # [B, H, action_dim] (padded -- only first 7 dims are real for Libero)
     if actions is not None:
-        real_dim = 7
+        real_dim = min(action_dim, actions.shape[-1])
         first_step = actions[:, 0, :real_dim]  # [B, 7]
         for d_i in range(real_dim):
             h = _safe_histogram(first_step[:, d_i])
@@ -524,12 +564,14 @@ def main(config: _config.TrainConfig):
 
     reward_discount = getattr(config.data, "reward_discount", None)
     if reward_discount is not None and config.iql is not None and not np.isclose(reward_discount, config.iql.discount):
-        raise ValueError("data.reward_discount must match iql.discount for pre-discounted FR3 rewards")
+        raise ValueError("data.reward_discount must match iql.discount for pre-discounted rewards")
 
     if config.iql is None:
         raise ValueError(
             f"Config '{config.name}' has no IQL section. Use a config like pi05_libero_iql or attach an iql= IQLConfig."
         )
+    if (config.iql.proprio_key is None) != (config.iql.next_proprio_key is None):
+        raise ValueError("IQL proprio_key and next_proprio_key must be configured together")
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
             f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."
@@ -582,7 +624,9 @@ def main(config: _config.TrainConfig):
     # for orbax. When resuming, restore_state below overwrites the random init
     # with the persisted critic / target_critic / value tensors in a single
     # atomic CheckpointManager.restore call alongside pi0 train_state.
-    sample_obs, sample_actions = host_sample_for_iql_init(batch, image_keys=image_keys)
+    sample_obs, sample_actions = host_sample_for_iql_init(
+        batch, image_keys=image_keys, proprio_key=config.iql.proprio_key, action_dim=config.iql.action_dim,
+    )
     pixel_iql = init_pi_iql(config, sample_obs, sample_actions)
 
     logging.info(
@@ -646,6 +690,9 @@ def main(config: _config.TrainConfig):
             next_image_keys=next_image_keys,
             step_reward_discount=step_reward_discount,
             progress_reward_weight=progress_reward_weight,
+            proprio_key=config.iql.proprio_key,
+            next_proprio_key=config.iql.next_proprio_key,
+            action_dim=config.iql.action_dim,
         )
         split_t = time.monotonic() - step_t0
 
@@ -750,7 +797,7 @@ def main(config: _config.TrainConfig):
             pbar.write("\n".join(lines))
 
             # Histograms from the most recent step.
-            hist_log = _build_distribution_logs(latest_dist)
+            hist_log = _build_distribution_logs(latest_dist, action_dim=config.iql.action_dim or 7)
             wandb.log({**reduced, **hist_log}, step=step)
             infos = []
 

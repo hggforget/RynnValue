@@ -26,6 +26,7 @@ import openpi.policies.franka_single_policy as franka_single_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.lingdong_language as lingdong_language
 import openpi.policies.lingdong_policy as lingdong_policy
+import openpi.policies.lingdong_rl_policy as lingdong_rl_policy
 import openpi.policies.pku_franka_collect_policy as pku_franka_collect_policy
 import openpi.policies.pku_franka_collect_rl_policy as pku_franka_collect_rl_policy
 import openpi.policies.pku_franka_policy as pku_franka_policy
@@ -263,6 +264,10 @@ class DataConfigFactory(abc.ABC):
     @abc.abstractmethod
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         """Create a data config."""
+
+    def create_for_inference(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        """Serving normally shares training preprocessing; factories may omit training-only label dependencies."""
+        return self.create(assets_dirs, model_config)
 
     def create_base_config(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
@@ -903,6 +908,64 @@ class LeRobotLingdongRightArmDataConfig(MultiDataConfigFactory):
             video_keys=lingdong_policy.VIDEO_KEYS,
             episode_ids=episode_ids,
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotLingdongRightArmRLDataConfig(LeRobotLingdongRightArmDataConfig):
+    """IQL on the same corrected Lingdong episodes, with explicit reward sources."""
+
+    reward_source: Literal["progress", "terminal"] = "progress"
+    reward_labels_path: str | None = None
+    assume_success: bool = False
+    reward_discount: float = 0.99
+    progress_reward_weight: float = 1.0
+    success_reward: float = 1.0
+    failure_penalty: float = 1.0
+
+    def create_for_inference(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        return super().create(assets_dirs, model_config)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> RLDataConfig:
+        repo_ids = self.repo_ids or tuple(str(pathlib.Path(self.dataset_root) / name) for name in self.dataset_names)
+        if len(repo_ids) != 1:
+            raise ValueError("Lingdong IQL requires the single merged final dataset")
+        repo = repo_ids[0]
+        metadata = {}
+        if (pathlib.Path(repo) / "meta/info.json").is_file():
+            metadata = lingdong_rl_policy.reward_metadata(
+                repo, task=self.task, reward_source=self.reward_source,
+                reward_labels_path=self.reward_labels_path, assume_success=self.assume_success,
+            )
+        base = super().create(assets_dirs, model_config)
+        inputs = base.data_transforms.inputs[0]
+        rl_inputs = lingdong_rl_policy.LingdongRightArmRLInputs(
+            state_indices=inputs.state_indices,
+            action_indices=inputs.action_indices,
+            crop_head=self.crop_head,
+            episode_lengths=metadata.get("episode_lengths", {}),
+            episode_tasks=metadata.get("episode_tasks", {}),
+            progress=metadata.get("progress", {}),
+            outcomes=metadata.get("outcomes", {}),
+            reward_source=self.reward_source,
+            discount=self.reward_discount,
+            progress_reward_weight=self.progress_reward_weight,
+            success_reward=self.success_reward,
+            failure_penalty=self.failure_penalty,
+        )
+        next_dt = model_config.action_horizon / 30.0
+        extra_dt = dict.fromkeys(("observation.state", *lingdong_policy.VIDEO_KEYS), (0.0, next_dt))
+        if metadata.get("dataset_progress"):
+            extra_dt["progress"] = tuple(t / 30.0 for t in range(model_config.action_horizon + 1))
+        fields = {field.name: getattr(base, field.name) for field in dataclasses.fields(DataConfig)}
+        fields.update(
+            repo_id=repo,
+            episode_ids=metadata.get("episode_ids"),
+            data_transforms=_transforms.Group(
+                inputs=[rl_inputs, *base.data_transforms.inputs[1:]], outputs=base.data_transforms.outputs,
+            ),
+        )
+        return RLDataConfig(**fields, extra_delta_timestamps=extra_dt, reward_source=self.reward_source)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2349,6 +2412,12 @@ class IQLConfig:
     # this list.
     image_keys: tuple[str, ...] = ("image.base_0_rgb", "image.left_wrist_0_rgb")
     next_image_keys: tuple[str, ...] = ("next_image_base", "next_image_wrist")
+    # Optional critic proprioception/conditioning; the two keys must be set together.
+    # Returned under "proprio" so jaxrl2 preserves the batch dimension for vectors.
+    proprio_key: str | None = None
+    next_proprio_key: str | None = None
+    # Physical action channels for the critic; None preserves legacy padded actions.
+    action_dim: int | None = None
     # Number of critic-warmup steps before the policy starts using IQL advantage weights.
     # During warmup the script behaves like normal flow-matching BC.
     critic_warmup_steps: int = 0
@@ -4286,6 +4355,33 @@ _CONFIGS += [
     for config in _CONFIGS
     if config.name == lingdong_policy.CROP_CONFIG_NAME
     for task, name in lingdong_policy.SINGLE_TASK_CROP_CONFIGS.items()
+]
+
+# Lingdong IQL shares SFT preprocessing/norms and retains its selected task episodes.
+_CONFIGS += [
+    dataclasses.replace(
+        config,
+        name=f"{config.name}_iql",
+        data=LeRobotLingdongRightArmRLDataConfig(
+            **{field.name: getattr(config.data, field.name) for field in dataclasses.fields(config.data)}
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=3e-5, decay_steps=20_000, decay_lr=3e-6,
+        ),
+        iql=IQLConfig(
+            critic_lr=3e-4, value_lr=3e-4, discount=0.99, expectile=0.8, A_scaling=1.0,
+            image_keys=("image.base_0_rgb", "image.right_wrist_0_rgb"),
+            next_image_keys=("next_image_base", "next_image_wrist"),
+            proprio_key="iql_state", next_proprio_key="next_iql_state", action_dim=8,
+            critic_warmup_steps=1_000,
+        ),
+        policy_metadata={**config.policy_metadata, "training_method": "iql"},
+    )
+    for config in _CONFIGS
+    if config.name in (
+        lingdong_policy.CROP_CONFIG_NAME, lingdong_policy.RELATIVE_CROP_CONFIG_NAME,
+        *lingdong_policy.SINGLE_TASK_CROP_CONFIGS.values(),
+    )
 ]
 
 # Keep training hyperparameters identical across action representations. Relative

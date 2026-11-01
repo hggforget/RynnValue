@@ -1,10 +1,15 @@
 from types import SimpleNamespace
 
+import pytest
+
 from openpi import transforms
 from openpi.policies import policy_config
 
 
-def test_default_loader_keeps_original_policy_constructor_and_optional_factory_is_generic(monkeypatch, tmp_path):
+@pytest.mark.parametrize("use_inference_hook", [False, True])
+def test_default_loader_keeps_original_policy_constructor_and_optional_factory_is_generic(
+    monkeypatch, tmp_path, use_inference_hook
+):
     model = object()
     loaded = []
 
@@ -28,6 +33,12 @@ def test_default_loader_keeps_original_policy_constructor_and_optional_factory_i
         assets_dirs=tmp_path,
         policy_metadata={"fps": 30},
     )
+    if use_inference_hook:
+        def training_only(*args):
+            raise AssertionError("Serving must not request training reward labels")
+
+        config.data.create = training_only
+        config.data.create_for_inference = lambda *args: data
     monkeypatch.setattr(policy_config.download, "maybe_download", lambda value: tmp_path)
     monkeypatch.setattr(policy_config._model, "restore_params", lambda *a, **k: {})  # noqa: SLF001
     monkeypatch.setattr(policy_config._policy, "Policy", ordinary)  # noqa: SLF001

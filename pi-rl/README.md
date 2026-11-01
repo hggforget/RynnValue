@@ -100,9 +100,9 @@ DRY_RUN=1 bash scripts/train_pi05_lingdong_right_arm.sh
 bash scripts/resume_pi05_lingdong_right_arm.sh
 ```
 
-The launcher follows `train_sft_pku_franka_collect_objects.sh`: automatic GPU discovery and FSDP across the selected devices. Both SFT launchers default to `BATCH_SIZE_PER_GPU=16`, so the global batch is 16 times the GPU count. Override the global batch with `BATCH_SIZE` or `--batch-size`; it must be divisible by the selected GPU count. Lingdong absolute and relative training, including the resume launcher, default to 32 data workers; pass `--num-workers` to override. The Lingdong and Franka collect-objects SFT presets share `_COLLECT_OBJECTS_SFT_HYPERPARAMS`: 20,000 steps, cosine learning rate 5e-5 to 5e-6 with 1,000 warmup steps, AdamW with gradient clipping at 1.0, EMA 0.999, logging every 100 steps, checkpointing every 1,000 steps, and retaining each 5,000-step checkpoint. Model action horizon remains 30 frames at 30 FPS.
+All Lingdong launchers automatically detect visible GPUs and use FSDP across all detected devices. Both SFT launchers default to `BATCH_SIZE_PER_GPU=16`, so the global batch is 16 times the detected GPU count (128 on eight GPUs). Override the global batch with `BATCH_SIZE` or `--batch-size`; it must be divisible by the selected GPU count. Lingdong absolute and relative training, including the resume launcher, default to 32 data workers; pass `--num-workers` to override. The Lingdong and Franka collect-objects SFT presets share `_COLLECT_OBJECTS_SFT_HYPERPARAMS`: 20,000 steps, cosine learning rate 5e-5 to 5e-6 with 1,000 warmup steps, AdamW with gradient clipping at 1.0, EMA 0.999, logging every 100 steps, checkpointing every 1,000 steps, and retaining each 5,000-step checkpoint. Model action horizon remains 30 frames at 30 FPS.
 
-The Lingdong launcher reads dataset files directly from `/oss/embodied-ai-data/lingdong` and base weights from `/oss/embodied-ai-data/pku/pi05_base/params`. Explicit `DATA_ROOT` and `WEIGHT_PARAMS_PATH` override these OSS paths. `INIT_CHECKPOINT` selects a checkpoint's `params` directory for weight initialization. Tokenizer resources use `OPENPI_DATA_HOME=/oss/embodied-ai-data/pku/openpi_cache` by default. Checkpoint output defaults to the relative path `../output/checkpoints`, resolved from the `pi-rl` directory. Override `GPUS`, `FSDP_DEVICES`, `BATCH_SIZE_PER_GPU`, `BATCH_SIZE`, `EXP_NAME`, `OPENPI_DATA_HOME`, or `CKPT_BASE_DIR` as needed; extra CLI arguments are forwarded to `scripts/train.py`. Existing experiment directories require an explicit `--resume` or a new experiment name. Updating the launcher does not change an already-running job's GPU selection or batch.
+The Lingdong launcher reads dataset files directly from `/oss/embodied-ai-data/lingdong` and base weights from `/oss/embodied-ai-data/pku/pi05_base/params`. Explicit `DATA_ROOT` and `WEIGHT_PARAMS_PATH` override these OSS paths. `INIT_CHECKPOINT` selects a checkpoint's `params` directory for weight initialization. Tokenizer resources use `OPENPI_DATA_HOME=/oss/embodied-ai-data/pku/openpi_cache` by default. Checkpoint output defaults to the relative path `../output/checkpoints`, resolved from the `pi-rl` directory. Override `GPUS`, `BATCH_SIZE_PER_GPU`, `BATCH_SIZE`, `EXP_NAME`, `OPENPI_DATA_HOME`, or `CKPT_BASE_DIR` as needed; extra CLI arguments are forwarded to `scripts/train.py`. Existing experiment directories require an explicit `--resume` or a new experiment name. Updating the launcher does not change an already-running job's GPU selection or batch.
 
 The `resume_pi05_lingdong_right_arm.sh` convenience launcher sets `INIT_CHECKPOINT` to `/oss/embodied-ai-data/lingdong/pi05_lingdong_right_arm/lingdong_right_arm_1027_163358/10000` and calls the normal training launcher. It reads the starting weights directly from OSS and uses the usual timestamped experiment name and local output directory. Training starts at step zero with a fresh optimizer and learning-rate schedule, for 20,000 steps by default. Override `INIT_CHECKPOINT` to select another starting checkpoint, and `EXP_NAME` to choose a new experiment name explicitly. `DRY_RUN=1` previews the training command.
 
@@ -164,6 +164,119 @@ finally:
 The broker checks the server's RTC metadata before execution, measures warm RPC latency, and requires `delay <= execution_horizon <= 30 - delay`. Tune the initial delay and execution horizon to the deployment's end-to-end latency. Warmup compiles both sampling paths before motion; it does not supply the initial execution chunk, which uses a fresh observation. The broker aligns responses by consumed action indices, keeps committed old commands if a result arrives early, and drops results invalidated by reset or prompt changes. All inference/reset calls use one serialized worker. Invalid responses, excessive latency, or queue exhaustion raise `RTCExecutionError`; the caller stops command execution and resets before restarting. `close()` interrupts pending socket I/O. The policy tick rate is 30 Hz; higher-rate servo interpolation belongs below this interface.
 
 For direct RPC integration, an RTC request adds `rtc={"previous_actions": pending_actions, "inference_delay": d}` to the ordinary observation. `pending_actions` is the available future queue in physical eight-channel units, aligned to the observation's control step, with at most 30 rows. The server reuses training normalization and zero-padding, guides only the eight physical output channels, and returns a full `[30, 8]` chunk plus an RTC acknowledgment. The client owns queue alignment. An RTC server also accepts plain requests and uses the original sampler for them; an ordinary server never enables RTC implicitly. Prefixes are request-local, so no previous plan is shared between server connections.
+
+### Lingdong offline IQL
+
+`scripts/train_iql_lingdong_right_arm.sh` runs the existing IQL critic/value learner and advantage-weighted flow-matching policy update on Lingdong data. Available configs are `pi05_lingdong_right_arm_crop_iql` (both tasks), `pi05_lingdong_right_arm_pick_up_crop_iql`, `pi05_lingdong_right_arm_put_down_crop_iql`, and `pi05_lingdong_right_arm_relative_crop_iql` (relative actions, both tasks). The same canonical episode filters, head crop, corrected right wrist, continuous measured state, binary whole-episode gripper labels and normalization assets are reused from SFT.
+
+The critic consumes both cameras, the eight measured physical channels and a two-way canonical task indicator; its actions contain only the eight physical channels. The policy still uses the pretrained padded 32-D action layout and augmented text instructions. Current/next observations use `t` and `min(t+H,T-1)` from the same original episode. The bootstrap mask is zero when `t+H >= T-1`, including an exact terminal endpoint. At an already terminal frame, reward is zero and there is no bootstrap.
+
+The existing final dataset has no reward, progress or success/failure labels. IQL defaults to `REWARD_SOURCE=progress` and fails preflight until real labels are provided. There is no fallback from missing rewards to assuming successful demonstrations. Two label sources are supported:
+
+* A dataset that actually contains a finite per-frame `progress` column, where larger values mean greater task progress.
+* `REWARD_LABELS_PATH=/path/to/rewards.json`, a sidecar tied to the exact final dataset fingerprint. This preserves source videos/Parquets, normalization fingerprints and existing scene prompts. It can contain progress from RynnValue and optional explicit success/failure labels. All selected episodes must have a finite progress value for every original frame; sparse predictions must be aligned/processed before supplying this file. Values may be negative remaining seconds; they are not clipped, normalized or forced monotonic.
+
+Adding a progress column changes dataset metadata/checksums; normalization manifests and scene-language assets must then be regenerated for that dataset. Sidecars avoid these source changes.
+
+A sidecar has this structure (the three progress values illustrate a three-frame episode):
+
+```json
+{
+  "version": "lingdong_iql_rewards_v1",
+  "dataset_signature": "HASH_PRINTED_BY_THE_COMMAND_BELOW",
+  "episodes": {
+    "0": {"progress": [-2.0, -1.2, -0.5], "success": true},
+    "1": {"progress": [-3.0, -2.1, -1.7], "success": false}
+  }
+}
+```
+
+Keys are current final-dataset episode IDs, after the prune/reindex operation. `success` is optional in progress mode and must be a boolean when supplied. In terminal mode, progress arrays are optional and every selected episode needs an outcome. An absent or null outcome is unknown. Unknown outcomes do not receive success bonuses or failure penalties in progress mode. Stale fingerprints, missing/short progress arrays, nonfinite values and invalid task/outcome labels fail validation.
+
+Dense reward is `progress_reward_weight * sum(gamma**k * (progress[t+k+1] - progress[t+k]))` over actual, unpadded transitions. This is discounted progress improvement, not the trainer's legacy potential-based shaping. When a labeled terminal endpoint is reached, an explicit success reward (default +1) or failure penalty (default -1) is added with the corresponding per-step discount. The transform emits `chunk_reward`, so the trainer uses it once without reshaping or discounting it again. The critic bootstraps with `gamma**H` on nonterminal chunks.
+
+```bash
+# Run from pi-rl. Inspect the exact reward-label fingerprint.
+PYTHONPATH=src:packages/openpi-client/src python scripts/check_lingdong_iql_data.py \
+    --dataset-root /oss/embodied-ai-data/lingdong --print-dataset-signature
+
+# Train either task independently; TASK=all is the default for joint training.
+TASK=pick_up REWARD_LABELS_PATH=/path/to/rewards.json \
+    bash scripts/train_iql_lingdong_right_arm.sh
+TASK=put_down REWARD_LABELS_PATH=/path/to/rewards.json \
+    bash scripts/train_iql_lingdong_right_arm.sh
+
+# Sparse reward from explicit success/failure annotations in the same sidecar format.
+TASK=pick_up REWARD_SOURCE=terminal REWARD_LABELS_PATH=/path/to/outcomes.json \
+    bash scripts/train_iql_lingdong_right_arm.sh
+
+# An explicitly chosen all-success demonstration baseline requires this opt-in.
+TASK=pick_up REWARD_SOURCE=terminal ASSUME_SUCCESS=1 \
+    bash scripts/train_iql_lingdong_right_arm.sh
+
+# Preview only; no reward scan, normalization, model loading or training.
+TASK=pick_up DRY_RUN=1 bash scripts/train_iql_lingdong_right_arm.sh
+
+# IQL checkpoints serve with their own config, without reward files at inference.
+POLICY_CONFIG=pi05_lingdong_right_arm_pick_up_crop_iql CHECKPOINT=/path/to/iql/checkpoint \
+    bash scripts/serve_pi05_lingdong_right_arm.sh
+```
+
+GPU discovery, per-GPU batch size, FSDP, base-weight paths and experiment/checkpoint locations match the Lingdong SFT launcher. `INIT_CHECKPOINT` optionally initializes the policy from an SFT checkpoint with compatible preprocessing; critic/value start fresh. `--resume` restores the policy, optimizers and IQL critic/target/value states together. Defaults are 20,000 steps, policy peak LR 3e-5 to 3e-6, critic/value LR 3e-4, gamma 0.99, expectile 0.8 and advantage scaling 1.0. For the first 1,000 steps, critic/value train while policy BC uses uniform weights; afterwards the existing clipped exponential advantage weights are used. `data.reward_discount` must match `iql.discount` when overriding gamma. Standard serving loads only policy parameters and checkpoint normalization and uses the ordinary SFT observation adapter.
+
+### Lingdong on Nebula
+
+Submit from this directory with `submit_to_nebula_lingdong.sh`. It stages only
+source, normalization and language assets, validates the generated trainer arguments
+and normalization locally, then calls `nebulactl run mdl`. Proxy environment
+variables are cleared for both submission and the worker. The default queue is
+`damo_eai_rfm_l20z`, with one eight-GPU worker using `pytorch271` and batch 16 per GPU.
+
+```bash
+# Preview the exact source snapshot and launch settings without contacting Nebula.
+bash submit_to_nebula_lingdong.sh --dry-run --num-train-steps 10
+
+# Small end-to-end SFT check, including checkpoint output at step 10.
+bash submit_to_nebula_lingdong.sh --method sft --task all \
+    --num-train-steps 10 --num-workers 2 \
+    -- --save-interval 10 --log-interval 1
+
+# Full single-task SFT (20,000 steps by default).
+bash submit_to_nebula_lingdong.sh --task pick_up
+
+# IQL requires reward labels accessible at the same OSS path on the worker.
+bash submit_to_nebula_lingdong.sh --method iql --task pick_up \
+    --reward-labels-path /oss/embodied-ai-data/lingdong/rewards.json
+```
+
+The default checkpoint root is
+`/oss/embodied-ai-data/lingdong/nebula_checkpoints`, with unique experiment names.
+`--gpus`, `--batch-size-per-gpu`, `--queue`, `--exp-name`, `--weight-params-path`
+and `--ckpt-base-dir` override launch settings. `--action-representation relative`
+selects relative actions for joint-task training. Extra trainer flags follow `--`;
+data and resource options must use the launcher's explicit arguments so local
+validation matches the submitted workload.
+
+Authentication uses `NEBULA_USER_CONFIG` or `~/.nebulactl/config.ini`; on this
+machine it can also reuse settings from the existing reference `submit.sh` under
+`/mnt/rynnbot_hangzhou/hdc/pi-rl` (`--reference-root` overrides that location).
+OSS mount settings can be provided as `NEBULA_OSS_ACCESS_ID`,
+`NEBULA_OSS_ACCESS_KEY`, `NEBULA_OSS_BUCKET` and `NEBULA_OSS_ENDPOINT`, or reused
+from that reference script. Bucket order is `embodied-ai-data,damo-rynnvla-data-zjk`.
+Credentials are passed in temporary files outside the uploaded snapshot.
+
+All Lingdong SFT, IQL and single-task launchers detect visible GPUs at training
+startup, first respecting the scheduler's `CUDA_VISIBLE_DEVICES` mask and otherwise
+counting devices with `nvidia-smi`. The FSDP shard count matches the detected GPU
+count, and the global batch is `BATCH_SIZE_PER_GPU × detected GPU count`. The uploaded manifest
+contains no fixed GPU IDs or global batch. Nebula's `--gpus` option specifies the
+scheduler resource request.
+
+The worker entry `run_nebula.py` establishes the same OSS paths as local training,
+installs `scripts/requirements-nebula.txt` and the local packages, checks the JAX
+GPU backend, and runs the existing Lingdong launcher. LeRobot comes from the
+existing shared source under the second bucket. Use `--skip-setup` only with a
+prepared image. W&B runs offline by default, so startup needs no interactive login.
 
 ## Updates
 
