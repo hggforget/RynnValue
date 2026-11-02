@@ -6,6 +6,23 @@
 [独立配置及说明](collect_objects_20261017.md)。它使用绝对末端目标和 0/1 夹爪动作，
 与本文旧单相机数据的动作契约不同。
 
+2026-10-27 至 2026-10-30 合并的 pick-and-place 数据使用专用配置
+`pi05_pku_franka_pickplace`。在 `pi-rl` 目录运行：
+
+```bash
+GPUS=0 bash scripts/train_sft_pku_franka_pickplace.sh
+```
+
+脚本默认读取 `/oss/embodied-ai-data/pku/fr3_real_pickplace_20261027_20261030_merged`，
+保留全部 177 条轨迹和 44 个任务的独立指令，使用双相机、14 维实测状态和 7 维绝对动作。
+默认每卡 batch 为 16、动作块长 30 帧、训练 20,000 步；启动前自动计算独立归一化统计。
+通过 `GPUS=0,1` 选择多卡，`BATCH_SIZE_PER_GPU` 调整每卡 batch，`DRY_RUN=1` 仅打印命令。
+覆盖数据路径使用 `REPO_ID`，同时作用于统计和训练；额外训练参数直接追加到脚本后。
+续训设置原 `EXP_NAME` 并追加 `--resume`，统计有效时可设置 `SKIP_NORM=1`。
+checkpoint 保存在 `checkpoints/pi05_pku_franka_pickplace/<EXP_NAME>/`。
+
+以下为旧单相机 `pi05_pku_franka` 配置说明。
+
 数据集：`/home/hdc/datasets/fr3_put_the_cube_onto_the_plate_20261013`，
 LeRobot v2.1，5 Hz，1 条轨迹、703 帧。
 

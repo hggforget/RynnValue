@@ -2590,6 +2590,24 @@ _CONFIGS = [
             "optional_image_keys": ("left_wrist_0_rgb",),
         },
     ),
+    # Merged Oct 27-30 pick-and-place: all 177 episodes and 44 task prompts.
+    # All recorded frames are retained; the original 5 Hz videos play at 30 Hz.
+    TrainConfig(
+        **_COLLECT_OBJECTS_SFT_HYPERPARAMS,
+        name="pi05_pku_franka_pickplace",
+        num_workers=4,
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+        data=LeRobotPkuFrankaCollectDataConfig(
+            repo_id="/oss/embodied-ai-data/pku/fr3_real_pickplace_20261027_20261030_merged",
+            assets=AssetsConfig(asset_id="pku_franka_pickplace"),
+            default_prompt=None,
+            base_config=DataConfig(prompt_from_task=True),
+            excluded_episode_ids=(),
+            action_representation="absolute",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+    ),
     # FR3 collect-objects dataset: 30 Hz, primary + wrist RGB, 64 episodes.
     # The six excluded episodes are explicitly marked failed in episodes.jsonl.
     # Train on absolute Cartesian targets, with measured state only (no target leakage).
@@ -4402,7 +4420,9 @@ _CONFIGS += [
         ),
     )
     for config in _CONFIGS
-    if isinstance(config.data, LeRobotPkuFrankaCollectDataConfig) and config.data.action_representation == "absolute"
+    if config.name.startswith("pi05_pku_franka_collect_objects")
+    and isinstance(config.data, LeRobotPkuFrankaCollectDataConfig)
+    and config.data.action_representation == "absolute"
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
