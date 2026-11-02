@@ -200,6 +200,7 @@ def main(
     advantage_horizon: int | None = None,
     advantage_quantile: float | None = None,
     advantage_lambda: float | None = None,
+    repo_ids: list[str] | None = None,
 ):
     """Compute norm stats fast.
 
@@ -208,6 +209,8 @@ def main(
         max_frames: Optional cap on the number of frames to scan.
         repo_id: Optional override of the dataset repo id (useful when one TrainConfig is
             reused across multiple sub-datasets, e.g. per-task RoboTwin dumps).
+        repo_ids: Optional ordered list of datasets for a MultiDataConfigFactory. Must
+            match the training --data.repo-ids; cannot be combined with repo_id.
         dataset_root: Optional collection-root override for factories exposing dataset_root.
         num_workers: PyTorch DataLoader worker processes. Default ``min(16, cpu_count)``.
             The stock script uses ``TrainConfig.num_workers`` which is typically 2.
@@ -229,6 +232,12 @@ def main(
     values ``train.py`` is launched with or the training run recomputes them from scratch.
     """
     config = _config.get_config(config_name)
+    if repo_ids is not None:
+        if not isinstance(config.data, _config.MultiDataConfigFactory):
+            raise ValueError("--repo-ids requires a multi-repo data config")
+        if not repo_ids or repo_id is not None:
+            raise ValueError("Use a nonempty --repo-ids list without --repo-id")
+        config = dataclasses.replace(config, data=dataclasses.replace(config.data, repo_ids=tuple(repo_ids)))
     data = config.data
     for field, value in (
         ("advantage_criterion", advantage_criterion),

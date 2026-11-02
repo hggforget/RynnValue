@@ -300,6 +300,23 @@ LeRobot installs from its bundled wheel when available; otherwise it requires
 `LEROBOT_ROOT` (the shared source under the second bucket by default). Use `--skip-setup` only with a
 prepared image. W&B runs offline by default, so startup needs no interactive login.
 
+### PKU Franka pick-and-place on Nebula
+
+`submit_to_nebula_pku_franka_pickplace.sh` supports all three pick-and-place variants:
+`--method sft`, `--method iql` and `--method cotrain-sft` (pick-and-place plus collect-objects, both SFT).
+It shares the source staging, credential handling, worker setup and GPU discovery described above.
+Normalization is recomputed on the worker by default; joint SFT computes shared statistics from both datasets.
+Checkpoints default to `/oss/embodied-ai-data/pku/nebula_checkpoints`.
+
+```bash
+bash submit_to_nebula_pku_franka_pickplace.sh --method sft --dry-run
+bash submit_to_nebula_pku_franka_pickplace.sh --method iql --gpus 2
+bash submit_to_nebula_pku_franka_pickplace.sh --method cotrain-sft --gpus 2
+```
+
+Use `--dry-run --skip-local-preflight` to stage a preview when training data is only mounted on the worker.
+See the [PKU Franka instructions](examples/pku_franka/README.md) for data overrides, resume, normalization and resource settings.
+
 ## Updates
 
 - [Sept 2025] We released PyTorch support in openpi.

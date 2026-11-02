@@ -137,6 +137,21 @@ class PkuFrankaCollectInputs:
 
 
 @dataclasses.dataclass(frozen=True)
+class PkuFrankaPickplaceCollectInputs(PkuFrankaCollectInputs):
+    """Repo 0 keeps pick-and-place tasks; repo 1 uses the collect-objects SFT instruction."""
+
+    def __call__(self, data: dict) -> dict:
+        if "dataset_index" in data:
+            dataset_index = int(np.asarray(data["dataset_index"]).item())
+            if dataset_index not in (0, 1):
+                raise ValueError("FR3 pickplace/collect SFT requires dataset_index 0 or 1")
+            if dataset_index == 1:
+                data = {**data, "prompt": EXPERT_COLLECT_OBJECTS_PROMPT}
+        # Serving has no dataset_index: preserve the caller's task instruction.
+        return super().__call__(data)
+
+
+@dataclasses.dataclass(frozen=True)
 class PkuFrankaCollectOutputs:
     """Trim padding; preserve the selected action representation and 0/1 gripper."""
 

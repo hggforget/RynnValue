@@ -1,4 +1,4 @@
-"""Nebula worker entry point; run the same Lingdong launcher used locally."""
+"""Nebula worker entry point for the local Lingdong and PKU Franka launchers."""
 
 import argparse
 import json
@@ -8,6 +8,21 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+LAUNCHERS = (
+    "scripts/train_pi05_lingdong_right_arm.sh",
+    "scripts/train_sft_pku_franka_pickplace.sh",
+    "scripts/train_iql_pku_franka_pickplace.sh",
+    "scripts/train_sft_pku_franka_pickplace_collect_objects.sh",
+)
+
+
+def training_command(root, launch):
+    # Existing Lingdong manifests have no launcher field.
+    launcher = launch.get("launcher", LAUNCHERS[0])
+    if launcher not in LAUNCHERS:
+        raise ValueError(f"Unsupported Nebula training launcher: {launcher}")
+    return ["bash", str(root / launcher), *launch["train_args"]]
 
 
 def direct_environment():
@@ -42,6 +57,20 @@ def run_setup(root, env):
             raise subprocess.CalledProcessError(code, command)
 
 
+def setup_oss_mounts():
+    for target, link in (
+        (Path("/data/oss_bucket_0"), Path("/oss/embodied-ai-data")),
+        (Path("/data/oss_bucket_1"), Path("/public/damo_rynnvla_data_zjk")),
+    ):
+        if not target.is_dir():
+            raise FileNotFoundError(f"Nebula OSS mount is missing: {target}")
+        if not link.exists():
+            subprocess.run(["sudo", "mkdir", "-p", str(link.parent)], check=True)
+            subprocess.run(["sudo", "ln", "-sfn", str(target), str(link)], check=True)
+        elif link.resolve() != target.resolve():
+            raise RuntimeError(f"Unexpected existing OSS path: {link}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launch-config", required=True, type=Path)
@@ -56,23 +85,12 @@ def main():
     for name in ("GPUS", "FSDP_DEVICES", "BATCH_SIZE"):
         env.pop(name, None)
     env.setdefault("WANDB_MODE", "offline")
-    command = ["bash", str(root / "scripts/train_pi05_lingdong_right_arm.sh"), *launch["train_args"]]
+    command = training_command(root, launch)
     print(json.dumps({"env": launch["env"], "command": command}, indent=2), flush=True)
     if args.dry_run:
         return
 
-    for target, link in (
-        (Path("/data/oss_bucket_0"), Path("/oss/embodied-ai-data")),
-        (Path("/data/oss_bucket_1"), Path("/public/damo_rynnvla_data_zjk")),
-    ):
-        if not target.is_dir():
-            raise FileNotFoundError(f"Nebula OSS mount is missing: {target}")
-        if not link.exists():
-            subprocess.run(["sudo", "mkdir", "-p", str(link.parent)], check=True)
-            subprocess.run(["sudo", "ln", "-sfn", str(target), str(link)], check=True)
-        elif link.resolve() != target.resolve():
-            raise RuntimeError(f"Unexpected existing OSS path: {link}")
-
+    setup_oss_mounts()
     subprocess.run(["nvidia-smi"], check=True, env=env)
     if not launch.get("skip_setup", False):
         run_setup(root, env)

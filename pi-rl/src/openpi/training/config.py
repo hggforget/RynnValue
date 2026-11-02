@@ -1115,6 +1115,60 @@ class LeRobotPkuFrankaCollectDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotPkuFrankaPickplaceCollectDataConfig(MultiDataConfigFactory):
+    """Joint SFT: pick-and-place first, collect-objects second, with shared normalization."""
+
+    repo_ids: tuple[str, ...] = (
+        "/oss/embodied-ai-data/pku/fr3_real_pickplace_20261027_20261030_merged",
+        "/oss/embodied-ai-data/pku/fr3_collect_objects_20261017_progress_expert_sup_step005000",
+    )
+    # Match the existing collect-objects SFT whitelist; keep every pick-and-place episode.
+    excluded_collect_episode_ids: tuple[int, ...] = (0, 2, 14, 21, 47, 52)
+
+    @override
+    def create_for_inference(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
+        if len(self.repo_ids) != 2 or self.repo_ids[0] == self.repo_ids[1]:
+            raise ValueError("FR3 joint SFT requires two distinct repo_ids in pickplace, collect-objects order")
+        return dataclasses.replace(
+            self.create_base_multi_config(assets_dirs, model_config, self.repo_ids),
+            data_transforms=_transforms.Group(
+                inputs=[pku_franka_collect_policy.PkuFrankaPickplaceCollectInputs()],
+                outputs=[pku_franka_collect_policy.PkuFrankaCollectOutputs()],
+            ),
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=("action",),
+            prompt_from_task=True,
+            video_backend="pyav",
+        )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
+        import json
+
+        data = self.create_for_inference(assets_dirs, model_config)
+        for repo in self.repo_ids:
+            pku_franka_collect_policy.validate_action_metadata(repo, "absolute")
+            info_path = pathlib.Path(repo) / "meta/info.json"
+            if not info_path.is_file():
+                continue
+            info = json.loads(info_path.read_text())
+            if info["fps"] != 30:
+                raise ValueError(f"FR3 joint SFT requires 30 Hz data: {repo}")
+            for key, shape in (
+                ("observation.state.cartesian", [6]), ("observation.state.gripper", [1]),
+                ("observation.state.joints", [7]), ("action", [7]),
+            ):
+                if info["features"].get(key, {}).get("shape") != shape:
+                    raise ValueError(f"FR3 joint SFT requires {key} with shape {shape}: {repo}")
+            for key in ("observation.images.primary", "observation.images.wrist"):
+                if info["features"].get(key, {}).get("dtype") != "video":
+                    raise ValueError(f"FR3 joint SFT requires both camera videos: {repo}")
+        collect_repo = self.repo_ids[1]
+        kept = pku_franka_collect_policy.training_episode_ids(collect_repo, self.excluded_collect_episode_ids)
+        return dataclasses.replace(data, episode_ids={collect_repo: kept} if kept is not None else None)
+
+
+@dataclasses.dataclass(frozen=True)
 class LeRobotPkuFrankaCollectRLDataConfig(LeRobotPkuFrankaCollectDataConfig):
     """IQL keeps successful, failed and unlabeled episodes; progress is required."""
 
@@ -2612,6 +2666,18 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             excluded_episode_ids=(),
             action_representation="absolute",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+    ),
+    TrainConfig(
+        **_COLLECT_OBJECTS_SFT_HYPERPARAMS,
+        name="pi05_pku_franka_pickplace_collect_objects",
+        num_workers=4,
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+        data=LeRobotPkuFrankaPickplaceCollectDataConfig(
+            repo_id="pku_franka_pickplace_collect_objects",
+            assets=AssetsConfig(asset_id="pku_franka_pickplace_collect_objects"),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
         checkpoint_base_dir="./checkpoints",

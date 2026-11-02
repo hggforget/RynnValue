@@ -25,6 +25,36 @@ checkpoint 保存在 `checkpoints/pi05_pku_franka_pickplace/<EXP_NAME>/`。
 启动时会打印最终选中的 Python 路径；`DRY_RUN=1` 也会探测依赖，但不计算统计或训练。
 也可通过 `PYTHON=/训练环境/bin/python` 显式指定，此时检查失败会直接报错。
 
+pick-and-place 与 collect-objects **都做 SFT** 的联合版本使用
+`pi05_pku_franka_pickplace_collect_objects`：
+
+```bash
+GPUS=0,1 bash scripts/train_sft_pku_franka_pickplace_collect_objects.sh
+# 只检查环境和打印命令：
+GPUS=0 DRY_RUN=1 bash scripts/train_sft_pku_franka_pickplace_collect_objects.sh
+```
+
+默认合并以下两路数据，按有效帧数混合采样，每个样本使用相同的 SFT 损失：
+
+- pick-and-place：`/oss/embodied-ai-data/pku/fr3_real_pickplace_20261027_20261030_merged`，
+  保留所有轨迹和 44 个任务各自的指令。
+- collect-objects：`/oss/embodied-ai-data/pku/fr3_collect_objects_20261017_progress_expert_sup_step005000`，
+  沿用已有 collect-objects SFT 的六条排除项 `0, 2, 14, 21, 47, 52`，指令为
+  `Place each solid-colored block on the plate that matches its color. Leave all wooden-textured blocks on the table.`
+
+两路任务索引分别解析，collect-objects 的任务 0 不会覆盖 pick-and-place 的任务 0。
+均使用双相机、14 维实测状态、7 维绝对动作和 30 帧动作块；不读取 progress/reward 标注。
+默认从 `pi05_base` 初始化，全参数训练 20,000 步，每卡 batch 为 16，学习率 `5e-5 → 5e-6`。
+
+通过 `PICKPLACE_REPO_ID` 和 `COLLECT_REPO_ID` 分别覆盖数据路径，统计和训练会使用相同顺序与筛选。
+启动时扫描两路所有有效帧，共用一套独立统计，写入
+`assets/pi05_pku_franka_pickplace_collect_objects/pku_franka_pickplace_collect_objects/norm_stats.json`；
+checkpoint 位于 `checkpoints/pi05_pku_franka_pickplace_collect_objects/<EXP_NAME>/`。
+Python 自动发现、`BATCH_SIZE_PER_GPU`、`FSDP_DEVICES`、`WEIGHT_PARAMS_PATH`、`SKIP_NORM=1` 和
+`EXP_NAME=已有实验名 ... --resume` 的用法与单数据集 SFT 相同；改动数据路径或筛选后应重新计算统计。
+直接调用统计脚本时使用 `--repo-ids <pickplace路径> <collect路径>`，
+直接训练时对应 `--data.repo-ids <pickplace路径> <collect路径>`。
+
 带奖励标注的 pick-and-place 使用 `pi05_pku_franka_pickplace_iql`：
 
 ```bash
@@ -56,6 +86,48 @@ critic/value 学习率 `3e-4`，expectile 为 `0.8`，优势权重为 `min(exp(Q
 `FSDP_DEVICES`、`DRY_RUN` 和 `SKIP_NORM` 设置。
 IQL 统计单独保存在 `assets/pi05_pku_franka_pickplace_iql/pku_franka_pickplace/norm_stats.json`，
 checkpoint 保存在 `checkpoints/pi05_pku_franka_pickplace_iql/<EXP_NAME>/`。
+
+以上三个 pick-and-place 版本都支持星云提交。在 `pi-rl` 目录运行：
+
+```bash
+# 预览源码快照、资源和训练参数，不创建作业：
+bash submit_to_nebula_pku_franka_pickplace.sh --method sft --dry-run
+
+# 各自提交一个独立作业：
+bash submit_to_nebula_pku_franka_pickplace.sh --method sft
+bash submit_to_nebula_pku_franka_pickplace.sh --method iql
+bash submit_to_nebula_pku_franka_pickplace.sh --method cotrain-sft
+
+# 资源和额外训练参数：
+bash submit_to_nebula_pku_franka_pickplace.sh --method cotrain-sft \
+    --gpus 2 --batch-size-per-gpu 16 --num-train-steps 20000 \
+    -- --save-interval 1000 --log-interval 100
+
+# 恢复原实验；IQL 同时恢复 Q/V、target Q 和优化器：
+bash submit_to_nebula_pku_franka_pickplace.sh --method iql \
+    --exp-name 已有实验名 --resume
+```
+
+默认使用队列 `damo_eai_rfm_l20z`、镜像 `pytorch271`、单 worker 八卡、每卡 batch 16。
+`--gpus` 申请调度资源，worker 按实际 `CUDA_VISIBLE_DEVICES` 自动选择 GPU、FSDP 和全局 batch。
+checkpoint 写入 `/oss/embodied-ai-data/pku/nebula_checkpoints/<配置名>/<EXP_NAME>/`，
+环境安装日志写入 `/oss/embodied-ai-data/pku/nebula_setup_logs/<EXP_NAME>.log`。
+作业默认在 worker 上重新计算归一化；`cotrain-sft` 会扫描两路有效帧，共同计算同一套统计。
+已有有效统计时可用 `--skip-norm`，提交前会检查对应配置的统计并随源码打包。
+
+`--repo-id` 覆盖 pick-and-place 数据，IQL 默认自动选择 expert 奖励版本；
+`--collect-repo-id` 覆盖联合 SFT 的 collect-objects 数据。
+`--weight-params-path`、`--ckpt-base-dir`、`--queue`、`--exp-name` 可覆盖权重、输出位置和调度配置。
+默认使用 `--preflight-python /opt/conda/envs/pi-rl/bin/python` 在提交机检查真实训练参数和数据元信息。
+提交机没有挂载数据或训练环境时，可显式增加 `--skip-local-preflight`，由 worker 启动时检查；
+这也适用于 `--dry-run`，此时仅完成源码打包和配置预览。
+
+认证与环境安装复用 [Lingdong 星云提交说明](../../README.md#lingdong-on-nebula)：
+使用 `NEBULA_USER_CONFIG` 和 `NEBULA_OSS_ACCESS_ID/KEY/BUCKET/ENDPOINT`，
+或 `--reference-root` 指向已有提交配置；挂载顺序为 `embodied-ai-data,damo-rynnvla-data-zjk`。
+源码快照不包含 checkpoints、数据集和凭证，提交及 worker 均清除代理变量。
+worker 复用 `setup_nebula.sh` 安装已验证依赖；`--wheelhouse`、`--pip-index-url` 和
+`--skip-setup` 的含义与 Lingdong 提交入口一致，W&B 默认离线运行。
 
 以下为旧单相机 `pi05_pku_franka` 配置说明。
 
