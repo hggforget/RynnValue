@@ -13,13 +13,17 @@ cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT/src:$PROJECT_ROOT/third_party/jaxrl2${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ -z "${PYTHON:-}" ]]; then
-    PYTHON=python3
-    for candidate in "$PROJECT_ROOT/.venv/bin/python" /opt/conda/envs/pi-rl/bin/python /opt/conda/envs/pku-pi-rl/bin/python; do
-        if [[ -x "$candidate" ]]; then
-            PYTHON="$candidate"
-            break
-        fi
-    done
+    # An activated environment belongs to the caller; never replace it with a
+    # similarly named environment at a fixed path on another training machine.
+    if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+        PYTHON="$VIRTUAL_ENV/bin/python"
+    elif [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
+        PYTHON="$CONDA_PREFIX/bin/python"
+    elif [[ -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
+        PYTHON="$PROJECT_ROOT/.venv/bin/python"
+    else
+        PYTHON=$(command -v python || command -v python3)
+    fi
 fi
 CONFIG=pi05_pku_franka_pickplace
 ASSET_ID=pku_franka_pickplace
@@ -89,6 +93,7 @@ TRAIN_ARGS=(
     "$@"
 )
 echo "Starting $CONFIG: GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, experiment=$EXP_NAME"
+echo "Python: $PYTHON"
 echo "Dataset: $REPO_ID (per-task prompts, all episodes, absolute actions)"
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     if [[ "${SKIP_NORM:-0}" != "1" ]]; then
@@ -99,6 +104,18 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '\n'
     exit 0
 fi
+
+"$PYTHON" - <<'PY'
+import importlib.util
+import sys
+
+missing = [name for name in ("numpy", "jax", "flax", "torch", "lerobot", "tyro") if importlib.util.find_spec(name) is None]
+if missing:
+    raise SystemExit(
+        f"Missing training dependencies in {sys.executable}: {', '.join(missing)}. "
+        "Activate the training environment or set PYTHON=/path/to/training/env/bin/python."
+    )
+PY
 
 # Recompute with this adapter and every frame; batch 1 includes the final frame.
 if [[ "${SKIP_NORM:-0}" != "1" ]]; then
