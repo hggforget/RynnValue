@@ -12,17 +12,88 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT/src:$PROJECT_ROOT/third_party/jaxrl2${PYTHONPATH:+:$PYTHONPATH}"
 
-if [[ -z "${PYTHON:-}" ]]; then
-    # An activated environment belongs to the caller; never replace it with a
-    # similarly named environment at a fixed path on another training machine.
-    if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
-        PYTHON="$VIRTUAL_ENV/bin/python"
-    elif [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
-        PYTHON="$CONDA_PREFIX/bin/python"
-    elif [[ -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
-        PYTHON="$PROJECT_ROOT/.venv/bin/python"
-    else
-        PYTHON=$(command -v python || command -v python3)
+check_python() {
+    "$1" - <<'PY'
+import importlib.util
+
+missing = [name for name in ("numpy", "jax", "flax", "torch", "lerobot", "tyro", "av") if importlib.util.find_spec(name) is None]
+if missing:
+    raise SystemExit(f"missing dependencies: {', '.join(missing)}")
+try:
+    compatible_lerobot = importlib.util.find_spec("lerobot.common.datasets.lerobot_dataset") is not None
+except (ImportError, AttributeError, ValueError):
+    compatible_lerobot = False
+if not compatible_lerobot:
+    raise SystemExit("requires LeRobot with lerobot.common.datasets (see pi-rl/pyproject.toml)")
+PY
+}
+
+if [[ -n "${PYTHON:-}" ]]; then
+    # An explicit override must not silently launch a different environment.
+    if ! problem=$(check_python "$PYTHON" 2>&1); then
+        echo "Requested Python is not a usable training environment: $PYTHON ($problem)" >&2
+        exit 1
+    fi
+else
+    PYTHON_CANDIDATES=()
+    add_python() {
+        local candidate="${1:-}" previous
+        [[ -n "$candidate" ]] || return 0
+        if [[ ! -x "$candidate" ]]; then
+            candidate=$(command -v "$candidate" || true)
+        fi
+        [[ -n "$candidate" && -x "$candidate" ]] || return 0
+        for previous in "${PYTHON_CANDIDATES[@]}"; do
+            [[ "$previous" != "$candidate" ]] || return 0
+        done
+        PYTHON_CANDIDATES+=("$candidate")
+    }
+    [[ -z "${VIRTUAL_ENV:-}" ]] || add_python "$VIRTUAL_ENV/bin/python"
+    [[ -z "${CONDA_PREFIX:-}" ]] || add_python "$CONDA_PREFIX/bin/python"
+    add_python "$PROJECT_ROOT/.venv/bin/python"
+    add_python python
+    add_python python3
+
+    # Discover named environments even when conda has not been activated.
+    CONDA_ROOTS=()
+    if [[ -n "${CONDA_PREFIX:-}" ]]; then
+        CONDA_ROOTS+=("${CONDA_PREFIX%%/envs/*}")
+    fi
+    conda_executable="${CONDA_EXE:-$(command -v conda || true)}"
+    if [[ "$conda_executable" == */bin/conda ]]; then
+        CONDA_ROOTS+=("${conda_executable%/bin/conda}")
+    fi
+    for name in python python3; do
+        path_python=$(command -v "$name" || true)
+        if [[ "$path_python" == */bin/python* ]]; then
+            CONDA_ROOTS+=("${path_python%/bin/python*}")
+        fi
+    done
+    CONDA_ROOTS+=(/opt/conda /opt/miniconda3 /opt/anaconda3)
+    if [[ -n "${HOME:-}" ]]; then
+        CONDA_ROOTS+=("$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3" "$HOME/mambaforge")
+    fi
+    for conda_root in "${CONDA_ROOTS[@]}"; do
+        add_python "$conda_root/envs/pi-rl/bin/python"
+        add_python "$conda_root/envs/pku-pi-rl/bin/python"
+    done
+    if [[ -n "${HOME:-}" && -f "$HOME/.conda/environments.txt" ]]; then
+        while IFS= read -r conda_environment || [[ -n "$conda_environment" ]]; do
+            [[ -z "$conda_environment" ]] || add_python "$conda_environment/bin/python"
+        done < "$HOME/.conda/environments.txt"
+    fi
+
+    PYTHON=""
+    for candidate in "${PYTHON_CANDIDATES[@]}"; do
+        if problem=$(check_python "$candidate" 2>&1); then
+            PYTHON="$candidate"
+            break
+        fi
+        echo "Skipping Python: $candidate ($problem)" >&2
+    done
+    if [[ -z "$PYTHON" ]]; then
+        echo "No compatible training Python found. Install the pi-rl dependencies in a virtualenv/Conda environment, or set PYTHON=/path/to/training/env/bin/python." >&2
+        exit 1
     fi
 fi
 CONFIG=pi05_pku_franka_pickplace
@@ -104,18 +175,6 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '\n'
     exit 0
 fi
-
-"$PYTHON" - <<'PY'
-import importlib.util
-import sys
-
-missing = [name for name in ("numpy", "jax", "flax", "torch", "lerobot", "tyro") if importlib.util.find_spec(name) is None]
-if missing:
-    raise SystemExit(
-        f"Missing training dependencies in {sys.executable}: {', '.join(missing)}. "
-        "Activate the training environment or set PYTHON=/path/to/training/env/bin/python."
-    )
-PY
 
 # Recompute with this adapter and every frame; batch 1 includes the final frame.
 if [[ "${SKIP_NORM:-0}" != "1" ]]; then

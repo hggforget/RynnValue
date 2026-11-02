@@ -20,8 +20,10 @@ GPUS=0 bash scripts/train_sft_pku_franka_pickplace.sh
 覆盖数据路径使用 `REPO_ID`，同时作用于统计和训练；额外训练参数直接追加到脚本后。
 续训设置原 `EXP_NAME` 并追加 `--resume`，统计有效时可设置 `SKIP_NORM=1`。
 checkpoint 保存在 `checkpoints/pi05_pku_franka_pickplace/<EXP_NAME>/`。
-默认优先使用已激活的 virtualenv/Conda 环境，也可通过 `PYTHON=/训练环境/bin/python` 显式指定。
-启动时会打印解释器路径，并检查基本训练依赖。
+无需设置 `PYTHON` 或激活环境：脚本会依次检查当前 virtualenv/Conda、项目 `.venv`、PATH，
+以及已安装的 `pi-rl` / `pku-pi-rl` Conda 环境和 Conda 环境注册表，自动跳过依赖不全的解释器。
+启动时会打印最终选中的 Python 路径；`DRY_RUN=1` 也会探测依赖，但不计算统计或训练。
+也可通过 `PYTHON=/训练环境/bin/python` 显式指定，此时检查失败会直接报错。
 
 以下为旧单相机 `pi05_pku_franka` 配置说明。
 

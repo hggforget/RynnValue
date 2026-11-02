@@ -28,17 +28,40 @@ class PickplaceLaunchTest(unittest.TestCase):
         weights.mkdir(parents=True)
         self.env = dict(os.environ)
         for key in (
-            "PYTHON", "VIRTUAL_ENV", "CONDA_PREFIX", "DRY_RUN", "SKIP_NORM",
+            "PYTHON", "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_EXE", "DRY_RUN", "SKIP_NORM",
             "BATCH_SIZE", "BATCH_SIZE_PER_GPU", "FSDP_DEVICES",
         ):
             self.env.pop(key, None)
         self.env.update(REPO_ID=str(dataset), WEIGHT_PARAMS_PATH=str(weights), GPUS="0", DRY_RUN="1")
 
-    def interpreter(self, prefix):
+    def interpreter(self, prefix, *, missing_numpy=False, incompatible_lerobot=False):
         path = self.root / prefix / "bin/python"
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Dry runs must not invoke any interpreter.
-        path.write_text("#!/bin/sh\nexit 99\n")
+        path.write_text(
+            f"#!{sys.executable}\n"
+            "import importlib.util, json, os, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "with open('calls.jsonl', 'a') as stream:\n"
+            "    stream.write(json.dumps({'args': args, 'jax': os.getenv('JAX_PLATFORMS')}) + '\\n')\n"
+            f"missing_numpy = {missing_numpy!r}\n"
+            f"incompatible_lerobot = {incompatible_lerobot!r}\n"
+            "if args[0] == '-':\n"
+            "    def find_spec(name):\n"
+            "        if (missing_numpy and name == 'numpy') or (incompatible_lerobot and name.startswith('lerobot.common')):\n"
+            "            return None\n"
+            "        return object()\n"
+            "    importlib.util.find_spec = find_spec\n"
+            "    sys.argv = args\n"
+            "    exec(compile(sys.stdin.read(), '<launcher-check>', 'exec'))\n"
+            "elif args[0] == 'scripts/compute_norm_stats_fast.py':\n"
+            "    path = pathlib.Path('assets/pi05_pku_franka_pickplace/pku_franka_pickplace/norm_stats.json')\n"
+            "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    stats = {key: {field: [0.0] * dim for field in ('mean', 'std', 'q01', 'q99')}\n"
+            "             for key, dim in [('state', 14), ('actions', 7)]}\n"
+            "    path.write_text(json.dumps({'norm_stats': stats}))\n"
+            "elif args[0] != 'scripts/train.py':\n"
+            "    raise SystemExit('Unexpected command: ' + repr(args))\n"
+        )
         path.chmod(0o755)
         return path
 
@@ -80,44 +103,45 @@ class PickplaceLaunchTest(unittest.TestCase):
         path_python = self.interpreter("path env")
         self.assert_selected(path_python, PATH=f"{path_python.parent}{os.pathsep}{self.env['PATH']}")
 
-    def fake_training_python(self, *, missing_numpy=False):
-        path = self.interpreter("active conda")
-        path.write_text(
-            f"#!{sys.executable}\n"
-            "import importlib.util, json, os, pathlib, sys\n"
-            "args = sys.argv[1:]\n"
-            "with open('calls.jsonl', 'a') as stream:\n"
-            "    stream.write(json.dumps({'args': args, 'jax': os.getenv('JAX_PLATFORMS')}) + '\\n')\n"
-            f"missing_numpy = {missing_numpy!r}\n"
-            "if args[0] == '-':\n"
-            "    importlib.util.find_spec = lambda name: None if missing_numpy and name == 'numpy' else object()\n"
-            "    sys.argv = args\n"
-            "    exec(compile(sys.stdin.read(), '<launcher-check>', 'exec'))\n"
-            "elif args[0] == 'scripts/compute_norm_stats_fast.py':\n"
-            "    path = pathlib.Path('assets/pi05_pku_franka_pickplace/pku_franka_pickplace/norm_stats.json')\n"
-            "    path.parent.mkdir(parents=True, exist_ok=True)\n"
-            "    stats = {key: {field: [0.0] * dim for field in ('mean', 'std', 'q01', 'q99')}\n"
-            "             for key, dim in [('state', 14), ('actions', 7)]}\n"
-            "    path.write_text(json.dumps({'norm_stats': stats}))\n"
-            "elif args[0] != 'scripts/train.py':\n"
-            "    raise SystemExit('Unexpected command: ' + repr(args))\n"
+    def test_no_activation_discovers_named_conda_after_rejecting_path_python(self):
+        path_python = self.interpreter("path env", missing_numpy=True)
+        shutil.copyfile(path_python, path_python.with_name("python3"))
+        path_python.with_name("python3").chmod(0o755)
+        discovered = self.interpreter("conda installation/envs/pi-rl")
+        self.assert_selected(
+            discovered, CONDA_EXE=str(self.root / "conda installation/bin/conda"),
+            PATH=f"{path_python.parent}{os.pathsep}{self.env['PATH']}",
         )
-        return path
+
+    def test_incomplete_active_conda_falls_back_to_checkout_venv(self):
+        active = self.interpreter("active conda", missing_numpy=True)
+        local = self.interpreter(".venv")
+        self.assert_selected(local, CONDA_PREFIX=str(active.parent.parent))
+
+    def test_incompatible_lerobot_falls_back_to_checkout_venv(self):
+        active = self.interpreter("active conda", incompatible_lerobot=True)
+        local = self.interpreter(".venv")
+        self.assert_selected(local, CONDA_PREFIX=str(active.parent.parent))
+
+    def test_dry_run_probes_dependencies_without_running_norms_or_training(self):
+        self.assert_selected(self.interpreter(".venv"))
+        calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual([call["args"] for call in calls], [["-"]])
 
     def test_missing_numpy_stops_before_norms_and_reports_the_interpreter(self):
-        active = self.fake_training_python(missing_numpy=True)
-        result = self.launch(CONDA_PREFIX=str(active.parent.parent), DRY_RUN="0")
+        active = self.interpreter("explicit", missing_numpy=True)
+        self.interpreter(".venv")
+        result = self.launch(PYTHON=str(active), DRY_RUN="0")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Missing training dependencies", result.stderr)
+        self.assertIn("Requested Python is not a usable training environment", result.stderr)
         self.assertIn("numpy", result.stderr)
-        self.assertIn(sys.executable, result.stderr)
-        self.assertIn("PYTHON=/path/to/training/env/bin/python", result.stderr)
+        self.assertIn(str(active), result.stderr)
         calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
         self.assertEqual([call["args"] for call in calls], [["-"]])
 
     def test_same_active_python_runs_checks_norms_and_training(self):
         self.interpreter(".venv")
-        active = self.fake_training_python()
+        active = self.interpreter("active conda")
         result = self.launch(CONDA_PREFIX=str(active.parent.parent), DRY_RUN="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Python: {active}\n", result.stdout)
