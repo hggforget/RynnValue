@@ -1122,6 +1122,8 @@ class LeRobotPkuFrankaCollectRLDataConfig(LeRobotPkuFrankaCollectDataConfig):
     reward_discount: float = 0.99
     progress_reward_weight: float = 1.0
     failure_penalty: float = 1.0
+    progress_reward_mode: Literal["potential", "delta"] = "potential"
+    task_conditioning: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> RLDataConfig:
@@ -1136,6 +1138,8 @@ class LeRobotPkuFrankaCollectRLDataConfig(LeRobotPkuFrankaCollectDataConfig):
         )
         extra_dt["progress"] = tuple(t / float(info["fps"]) for t in range(model_config.action_horizon + 1))
         base = super().create(assets_dirs, model_config)
+        if self.task_conditioning and not base.prompt_from_task:
+            raise ValueError("Task-conditioned FR3 IQL requires prompt_from_task=True")
         fields = {f.name: getattr(base, f.name) for f in dataclasses.fields(base)}
         fields["data_transforms"] = _transforms.Group(
             inputs=[pku_franka_collect_rl_policy.PkuFrankaCollectRLInputs(
@@ -1145,6 +1149,10 @@ class LeRobotPkuFrankaCollectRLDataConfig(LeRobotPkuFrankaCollectDataConfig):
                 progress_reward_weight=self.progress_reward_weight,
                 failure_penalty=self.failure_penalty,
                 action_representation=self.action_representation,
+                progress_reward_mode=self.progress_reward_mode,
+                task_indices=(
+                    pku_franka_collect_rl_policy.collection_task_indices(self.repo_id) if self.task_conditioning else ()
+                ),
             )],
             outputs=[pku_franka_collect_policy.PkuFrankaCollectOutputs()],
         )
@@ -2607,6 +2615,48 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
         checkpoint_base_dir="./checkpoints",
+    ),
+    TrainConfig(
+        name="pi05_pku_franka_pickplace_iql",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+        data=LeRobotPkuFrankaCollectRLDataConfig(
+            repo_id=(
+                "/oss/embodied-ai-data/pku/"
+                "fr3_real_pickplace_20261027_20261030_merged_progress_expert_sup_step025000_on_vlm4b90k"
+            ),
+            assets=AssetsConfig(asset_id="pku_franka_pickplace"),
+            default_prompt=None,
+            base_config=DataConfig(prompt_from_task=True),
+            excluded_episode_ids=(),
+            # Episode indices belong to this merged dataset. No failure labels
+            # are available, so do not inherit the collect-objects failure list.
+            failed_episode_ids=(),
+            action_representation="absolute",
+            reward_discount=0.99,
+            progress_reward_mode="delta",
+            task_conditioning=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+        batch_size=16,
+        num_workers=4,
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=3e-5, decay_steps=20_000, decay_lr=3e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=1_000,
+        keep_period=5_000,
+        fsdp_devices=1,
+        iql=IQLConfig(
+            critic_lr=3e-4, value_lr=3e-4, discount=0.99, expectile=0.8,
+            A_scaling=1.0, encoder_type="resnet_18_v1", color_jitter=False,
+            num_cameras=2,
+            proprio_key="iql_state", next_proprio_key="next_iql_state",
+            action_dim=7,
+            critic_warmup_steps=1_000,
+        ),
     ),
     # FR3 collect-objects dataset: 30 Hz, primary + wrist RGB, 64 episodes.
     # The six excluded episodes are explicitly marked failed in episodes.jsonl.

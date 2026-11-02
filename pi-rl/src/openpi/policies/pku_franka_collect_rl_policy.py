@@ -3,6 +3,7 @@
 import dataclasses
 import json
 import pathlib
+from typing import Literal
 
 import numpy as np
 from openpi_client import image_tools
@@ -22,6 +23,21 @@ def collection_metadata(repo_id: str | None, *, require_progress: bool = True) -
         raise ValueError("This FR3 training mode requires per-frame 'progress' in metadata and parquet files.")
     episodes = [json.loads(line) for line in (root / "meta/episodes.jsonl").read_text().splitlines() if line.strip()]
     return info, {int(ep["episode_index"]): int(ep["length"]) for ep in episodes}
+
+
+def collection_task_indices(repo_id: str) -> tuple[int, ...]:
+    """Use the dataset task vocabulary for critic conditioning, independently of row order."""
+    root = pathlib.Path(repo_id)
+    if not (root / "meta/info.json").is_file():
+        # Policy serving does not use the critic or require the training dataset.
+        return ()
+    rows = [json.loads(line) for line in (root / "meta/tasks.jsonl").read_text().splitlines() if line.strip()]
+    indices = [row["task_index"] for row in rows]
+    if not indices or any(type(index) is not int or index < 0 for index in indices):
+        raise ValueError("FR3 critic conditioning requires nonnegative integer task indices")
+    if len(set(indices)) != len(indices):
+        raise ValueError("FR3 critic conditioning requires unique task indices")
+    return tuple(sorted(indices))
 
 
 def window_advantages(progress: np.ndarray, horizon: int, discount: float) -> np.ndarray:
@@ -46,7 +62,7 @@ def filtered_frame_indices(
     criterion: str,
     quantile: float,
 ) -> tuple[tuple[int, ...], float]:
-    import pyarrow.parquet as pq  # noqa: PLC0415 - optional for NumPy-only protocol tests
+    import pyarrow.parquet as pq  # Optional for NumPy-only protocol tests.
 
     collection_metadata(repo_id)
     if not 0 <= quantile <= 1:
@@ -86,6 +102,21 @@ class PkuFrankaCollectRLInputs:
     progress_reward_weight: float = 1.0
     failure_penalty: float = 1.0
     action_representation: collect.ActionRepresentation = "absolute"
+    # Keep legacy collection PBRS as the default. Pick-and-place uses measured
+    # progress increments, without replacing the last prediction by zero.
+    progress_reward_mode: Literal["potential", "delta"] = "potential"
+    task_indices: tuple[int, ...] = ()
+
+    def __post_init__(self):
+        if self.progress_reward_mode not in ("potential", "delta"):
+            raise ValueError("FR3 progress_reward_mode must be potential or delta")
+        if not np.isfinite(self.discount) or not 0 < self.discount <= 1:
+            raise ValueError("FR3 reward discount must be in (0, 1]")
+        for value in (self.progress_reward_weight, self.failure_penalty):
+            if not np.isfinite(value) or value < 0:
+                raise ValueError("FR3 reward weights must be finite and nonnegative")
+        if len(set(self.task_indices)) != len(self.task_indices):
+            raise ValueError("FR3 critic task indices must be unique")
 
     def __call__(self, data: dict) -> dict:
         transform = collect.PkuFrankaCollectInputs(action_representation=self.action_representation)
@@ -112,15 +143,26 @@ class PkuFrankaCollectRLInputs:
         frame = int(np.asarray(data["frame_index"]).item())
         horizon = len(inputs["actions"])
         length = self.episode_lengths[episode]
+        if not 0 <= frame < length or horizon < 1:
+            raise ValueError("Invalid FR3 IQL frame or action horizon")
         terminal = frame + horizon >= length - 1
         steps = min(horizon, max(0, length - 1 - frame))
         progress = np.asarray(data["progress"], dtype=np.float32).reshape(-1)
         if progress.shape != (horizon + 1,) or not np.isfinite(progress).all():
             raise ValueError("Expected finite progress [H+1] for FR3 IQL")
         mask = float(not terminal)
-        # Absorbing terminal potential is zero. Padded endpoints never bootstrap.
-        shaped = self.progress_reward_weight * (self.discount**steps * mask * progress[-1] - progress[0])
-        penalty = -self.failure_penalty if terminal and episode in self.failed_episode_ids else 0.0
+        if self.progress_reward_mode == "delta":
+            # Only real transitions contribute. In particular, the final row has
+            # zero reward and repeated padding cannot fabricate an improvement.
+            increments = np.diff(progress)[:steps]
+            shaped = self.progress_reward_weight * float(np.dot(self.discount ** np.arange(steps), increments))
+        else:
+            # Legacy PBRS: absorbing terminal potential is zero.
+            shaped = self.progress_reward_weight * (self.discount**steps * mask * progress[-1] - progress[0])
+        penalize = terminal and episode in self.failed_episode_ids
+        if self.progress_reward_mode == "delta" and steps == 0:
+            penalize = False
+        penalty = -self.failure_penalty if penalize else 0.0
         reward = shaped + self.discount ** max(0, steps - 1) * penalty
         inputs.update(
             next_state=future["state"],
@@ -129,7 +171,17 @@ class PkuFrankaCollectRLInputs:
             next_image_wrist=np.asarray(image_tools.resize_with_pad(future["image"]["left_wrist_0_rgb"], 224, 224)),
             mask=np.float32(mask),
             reward=np.float32(reward),
-            # Already discounted PBRS + terminal penalty; trainer must not shape it twice.
+            # Already discounted; trainer must not shape it twice.
             chunk_reward=np.float32(reward),
         )
+        if self.task_indices:
+            task_index = int(np.asarray(data["task_index"]).item())
+            if task_index not in self.task_indices:
+                raise ValueError(f"Unknown FR3 critic task index: {task_index}")
+            task = np.zeros(len(self.task_indices), dtype=np.float32)
+            task[self.task_indices.index(task_index)] = 1.0
+            # Both sides stay in measured physical units. Policy normalization
+            # runs afterwards and must not alter the one-hot task vocabulary.
+            inputs["iql_state"] = np.concatenate((inputs["state"], task))
+            inputs["next_iql_state"] = np.concatenate((future["state"], task))
         return inputs

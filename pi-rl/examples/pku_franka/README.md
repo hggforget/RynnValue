@@ -25,6 +25,38 @@ checkpoint 保存在 `checkpoints/pi05_pku_franka_pickplace/<EXP_NAME>/`。
 启动时会打印最终选中的 Python 路径；`DRY_RUN=1` 也会探测依赖，但不计算统计或训练。
 也可通过 `PYTHON=/训练环境/bin/python` 显式指定，此时检查失败会直接报错。
 
+带奖励标注的 pick-and-place 使用 `pi05_pku_franka_pickplace_iql`：
+
+```bash
+GPUS=0,1 bash scripts/train_iql_pku_franka_pickplace.sh
+# 只检查环境和打印命令：
+GPUS=0 DRY_RUN=1 bash scripts/train_iql_pku_franka_pickplace.sh
+# 从上次 IQL checkpoint 恢复策略、优化器、Q/V 和 target Q：
+GPUS=0,1 EXP_NAME=已有实验名 SKIP_NORM=1 bash scripts/train_iql_pku_franka_pickplace.sh --resume
+```
+
+默认数据为
+`/oss/embodied-ai-data/pku/fr3_real_pickplace_20261027_20261030_merged_progress_expert_sup_step025000_on_vlm4b90k`。
+数据、相机、状态和绝对动作处理与上述 SFT 一致；保留全部轨迹及各自指令，
+Q/V 额外输入 14 维实测状态和 44 维任务 one-hot，critic 只使用 7 个真实动作通道。
+策略默认从 `pi05_base` 初始化，Q/V 随机初始化；可设置 `WEIGHT_PARAMS_PATH=/SFT检查点/params`
+从已有 SFT 策略开始新的 IQL 实验。
+
+标注 `progress = -remaining_time_s`，每步奖励为 `progress[t+1] - progress[t]`，
+动作块奖励为 `sum(gamma**k * reward[t+k])`，Q 的目标为 `R + gamma**30 * mask * V(next)`。
+默认 `gamma=0.99`，允许进度回退和负奖励，终止时关闭 bootstrap，padding 不产生奖励；
+最后一帧没有后继转移，奖励为零。保留标注的终点预测，不将其强制置零，
+也不把 episode 结束当作成功或套用旧 collect-objects 数据的失败编号。
+
+默认训练 20,000 步，每卡 batch 为 16，策略学习率 `3e-5 → 3e-6`，
+critic/value 学习率 `3e-4`，expectile 为 `0.8`，优势权重为 `min(exp(Q-V), 100)`。
+前 1,000 步同时训练 Q/V 和普通 BC，之后策略采用优势加权 flow-matching 损失。
+可追加 `--iql.expectile 0.7`、`--iql.A-scaling 2.0`、`--num-train-steps 10000` 等训练参数。
+启动脚本支持与 SFT 相同的 Python 自动发现、`REPO_ID`、`BATCH_SIZE_PER_GPU`、
+`FSDP_DEVICES`、`DRY_RUN` 和 `SKIP_NORM` 设置。
+IQL 统计单独保存在 `assets/pi05_pku_franka_pickplace_iql/pku_franka_pickplace/norm_stats.json`，
+checkpoint 保存在 `checkpoints/pi05_pku_franka_pickplace_iql/<EXP_NAME>/`。
+
 以下为旧单相机 `pi05_pku_franka` 配置说明。
 
 数据集：`/home/hdc/datasets/fr3_put_the_cube_onto_the_plate_20261013`，

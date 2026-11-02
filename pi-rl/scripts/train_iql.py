@@ -9,7 +9,9 @@ Per step we:
 The data pipeline (see `openpi.training.rl_data_loader`) yields each batch as a
 single dict that carries both the pi0 view (state / image / tokenized_prompt /
 actions) and the IQL view (next_state / next_image_base / next_image_wrist /
-reward / mask). Rewards are synthesized: r=1 and mask=0 at episode end.
+reward / mask). Robot-specific transforms supply rewards and terminal masks.
+For merged FR3 pick-and-place these are discounted progress increments, with
+measured state and a one-hot task supplied to Q/V as additional conditioning.
 """
 import dataclasses
 import functools
