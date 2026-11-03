@@ -1178,6 +1178,9 @@ class LeRobotPkuFrankaPickplaceCollectDrawerDataConfig(LeRobotPkuFrankaPickplace
 
     dataset_root: str = "/oss/embodied-ai-data/pku/fr3_drawer_20261102_03"
 
+    def _collection_roots(self) -> tuple[str, ...]:
+        return (self.dataset_root,)
+
     @override
     def create_for_inference(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
         data = super().create_for_inference(assets_dirs, model_config)
@@ -1192,20 +1195,43 @@ class LeRobotPkuFrankaPickplaceCollectDrawerDataConfig(LeRobotPkuFrankaPickplace
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
         data = super().create(assets_dirs, model_config)
-        root = pathlib.Path(self.dataset_root)
-        if not root.is_dir():
-            raise FileNotFoundError(f"Drawer dataset root is not mounted: {root}")
-        info_paths = [root / "meta/info.json"] if (root / "meta/info.json").is_file() else sorted(root.rglob("meta/info.json"))
-        if not info_paths:
-            raise ValueError(f"No LeRobot datasets found under drawer root: {root}")
-        drawer_repos = tuple(str(path.parent.parent) for path in info_paths)
-        repos = (*data.repo_ids, *drawer_repos)
+        roots = self._collection_roots()
+        collection_repos = []
+        for directory in roots:
+            root = pathlib.Path(directory)
+            if not root.is_dir():
+                raise FileNotFoundError(f"FR3 dataset collection root is not mounted: {root}")
+            info_paths = (
+                [root / "meta/info.json"] if (root / "meta/info.json").is_file()
+                else sorted(root.rglob("meta/info.json"))
+            )
+            if not info_paths:
+                raise ValueError(f"No LeRobot datasets found under collection root: {root}")
+            collection_repos.extend(str(path.parent.parent) for path in info_paths)
+        repos = (*data.repo_ids, *collection_repos)
         if len({pathlib.Path(repo).resolve() for repo in repos}) != len(repos):
-            raise ValueError("FR3 triple SFT requires distinct datasets; drawer data overlaps another source")
-        for repo in drawer_repos:
+            raise ValueError("FR3 joint SFT requires distinct datasets; a collection overlaps another source")
+        for repo in collection_repos:
             self._validate_repo(repo)
-        logging.info("FR3 triple SFT: pickplace + collect-objects + %d drawer datasets", len(drawer_repos))
+        logging.info(
+            "FR3 joint SFT: pickplace + collect-objects + %d datasets from %d collection roots",
+            len(collection_repos), len(roots),
+        )
         return dataclasses.replace(data, repo_ids=repos)
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPkuFrankaSuperDataConfig(LeRobotPkuFrankaPickplaceCollectDrawerDataConfig):
+    """Five-source SFT with the original drawer tasks and both Nov 3 collections."""
+
+    additional_dataset_roots: tuple[str, ...] = (
+        "/oss/embodied-ai-data/pku/fr3_drawer_20261103",
+        "/oss/embodied-ai-data/pku/fr3_plate_20261103",
+    )
+
+    @override
+    def _collection_roots(self) -> tuple[str, ...]:
+        return (self.dataset_root, *self.additional_dataset_roots)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2730,6 +2756,18 @@ _CONFIGS = [
         data=LeRobotPkuFrankaPickplaceCollectDrawerDataConfig(
             repo_id="pku_franka_pickplace_collect_drawer",
             assets=AssetsConfig(asset_id="pku_franka_pickplace_collect_drawer"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+    ),
+    TrainConfig(
+        **_COLLECT_OBJECTS_SFT_HYPERPARAMS,
+        name="pi05_pku_franka_super",
+        num_workers=4,
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+        data=LeRobotPkuFrankaSuperDataConfig(
+            repo_id="pku_franka_super",
+            assets=AssetsConfig(asset_id="pku_franka_super"),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
         checkpoint_base_dir="./checkpoints",

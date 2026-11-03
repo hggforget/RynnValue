@@ -15,6 +15,7 @@ LAUNCHERS = (
     "scripts/train_iql_pku_franka_pickplace.sh",
     "scripts/train_sft_pku_franka_pickplace_collect_objects.sh",
     "scripts/train_sft_pku_franka_pickplace_collect_drawer.sh",
+    "scripts/train_sft_pku_franka_super.sh",
 )
 
 

@@ -82,6 +82,35 @@ bash submit_to_nebula_pku_franka_pickplace.sh --method cotrain3-sft --dry-run
 
 实际提交去掉 `--dry-run`；可通过 `--drawer-root` 覆盖第三路根目录。
 
+超级混训使用独立配置 `pi05_pku_franka_super`，默认包含五路数据：
+上述 pick-and-place、collect-objects、`fr3_drawer_20261102_03`，以及新增的
+`/oss/embodied-ai-data/pku/fr3_drawer_20261103` 和 `/oss/embodied-ai-data/pku/fr3_plate_20261103`。
+
+```bash
+# 不需要设置 Python 或先激活环境，默认使用可见 GPU：
+bash scripts/train_sft_pku_franka_super.sh
+# 指定 GPU，或只预览启动命令：
+GPUS=0,1 bash scripts/train_sft_pku_franka_super.sh
+DRY_RUN=1 bash scripts/train_sft_pku_franka_super.sh
+# 星云预览（实际提交去掉 --dry-run）：
+bash submit_to_nebula_pku_franka_pickplace.sh --method super-sft --dry-run
+```
+
+自动发现三份 collection 中的所有 LeRobot 子数据集，按有效帧均匀混合采样。
+每个任务保留自己的指令，collect-objects 继续使用其固定指令和六条轨迹排除项；
+均使用 30 Hz、双相机、14 维实测状态、7 维绝对动作和 30 帧动作块，全部执行 SFT。
+默认从 `pi05_base` 初始化，全参数训练 20,000 步，每卡 batch 为 16；启动前重新计算五路共享统计。
+深度归档不参与加载；相对动作和 progress/reward 不作为模型输入或训练标签。
+
+通过 `PICKPLACE_REPO_ID`、`COLLECT_REPO_ID`、`DRAWER_ROOT`、`EXTRA_DRAWER_ROOT`、`PLATE_ROOT`
+分别覆盖五路路径，统计与训练保持一致。星云对应参数为 `--repo-id`、`--collect-repo-id`、
+`--drawer-root`、`--extra-drawer-root`、`--plate-root`。
+直接调用统计脚本时，新增两路使用 `--additional-dataset-roots <新drawer路径> <新plate路径>`；
+训练 CLI 对应 `--data.additional-dataset-roots`，也支持传入更多兼容的数据目录。
+独立统计写入 `assets/pi05_pku_franka_super/pku_franka_super/norm_stats.json`，
+checkpoint 位于 `checkpoints/pi05_pku_franka_super/<EXP_NAME>/`。
+续训使用原 `EXP_NAME` 和 `--resume`，已有正确统计时可加 `SKIP_NORM=1`。
+
 带奖励标注的 pick-and-place 使用 `pi05_pku_franka_pickplace_iql`：
 
 ```bash

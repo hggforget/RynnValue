@@ -201,6 +201,7 @@ def main(
     advantage_quantile: float | None = None,
     advantage_lambda: float | None = None,
     repo_ids: list[str] | None = None,
+    additional_dataset_roots: list[str] | None = None,
 ):
     """Compute norm stats fast.
 
@@ -212,6 +213,8 @@ def main(
         repo_ids: Optional ordered list of datasets for a MultiDataConfigFactory. Must
             match the training --data.repo-ids; cannot be combined with repo_id.
         dataset_root: Optional collection-root override for factories exposing dataset_root.
+        additional_dataset_roots: Additional collection roots for the FR3 super SFT factory;
+            must match training --data.additional-dataset-roots.
         num_workers: PyTorch DataLoader worker processes. Default ``min(16, cpu_count)``.
             The stock script uses ``TrainConfig.num_workers`` which is typically 2.
         batch_size: Loader batch size. Default ``TrainConfig.batch_size``.
@@ -255,6 +258,12 @@ def main(
         if not hasattr(config.data, "dataset_root"):
             raise ValueError(f"Config {config_name} does not support --dataset-root")
         config = dataclasses.replace(config, data=dataclasses.replace(config.data, dataset_root=dataset_root))
+    if additional_dataset_roots is not None:
+        if not hasattr(config.data, "additional_dataset_roots"):
+            raise ValueError(f"Config {config_name} does not support --additional-dataset-roots")
+        config = dataclasses.replace(
+            config, data=dataclasses.replace(config.data, additional_dataset_roots=tuple(additional_dataset_roots))
+        )
     if episode_filter_path is not None and hasattr(config.data, "episode_filter_path"):
         config = dataclasses.replace(
             config, data=dataclasses.replace(config.data, episode_filter_path=episode_filter_path)

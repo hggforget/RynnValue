@@ -103,6 +103,26 @@ case "${FR3_INCLUDE_DRAWER:-0}" in
     1) CONFIG=pi05_pku_franka_pickplace_collect_drawer; ASSET_ID=pku_franka_pickplace_collect_drawer ;;
     *) echo "FR3_INCLUDE_DRAWER must be 0 or 1." >&2; exit 1 ;;
 esac
+case "${FR3_SUPER_COTRAIN:-0}" in
+    0) ;;
+    1)
+        if [[ "${FR3_INCLUDE_DRAWER:-0}" != "1" ]]; then
+            echo "Super SFT requires FR3_INCLUDE_DRAWER=1; use train_sft_pku_franka_super.sh." >&2
+            exit 1
+        fi
+        CONFIG=pi05_pku_franka_super
+        ASSET_ID=pku_franka_super
+        EXTRA_DRAWER_ROOT="${EXTRA_DRAWER_ROOT:-/oss/embodied-ai-data/pku/fr3_drawer_20261103}"
+        PLATE_ROOT="${PLATE_ROOT:-/oss/embodied-ai-data/pku/fr3_plate_20261103}"
+        for collection_root in "$EXTRA_DRAWER_ROOT" "$PLATE_ROOT"; do
+            if [[ ! -d "$collection_root" ]]; then
+                echo "Super SFT data is not mounted at $collection_root; set EXTRA_DRAWER_ROOT / PLATE_ROOT." >&2
+                exit 1
+            fi
+        done
+        ;;
+    *) echo "FR3_SUPER_COTRAIN must be 0 or 1." >&2; exit 1 ;;
+esac
 PICKPLACE_REPO_ID="${PICKPLACE_REPO_ID:-/oss/embodied-ai-data/pku/fr3_real_pickplace_20261027_20261030_merged}"
 COLLECT_REPO_ID="${COLLECT_REPO_ID:-/oss/embodied-ai-data/pku/fr3_collect_objects_20261017_progress_expert_sup_step005000}"
 EXP_NAME="${EXP_NAME:-fr3_pickplace_collect_sft_$(date +%Y%m%d_%H%M%S)}"
@@ -181,6 +201,10 @@ if [[ "${FR3_INCLUDE_DRAWER:-0}" == "1" ]]; then
     NORM_ARGS+=(--dataset-root "$DRAWER_ROOT")
     TRAIN_ARGS+=(--data.dataset-root "$DRAWER_ROOT")
 fi
+if [[ "${FR3_SUPER_COTRAIN:-0}" == "1" ]]; then
+    NORM_ARGS+=(--additional-dataset-roots "$EXTRA_DRAWER_ROOT" "$PLATE_ROOT")
+    TRAIN_ARGS+=(--data.additional-dataset-roots "$EXTRA_DRAWER_ROOT" "$PLATE_ROOT")
+fi
 TRAIN_ARGS+=("$@")
 echo "Starting $CONFIG: GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, experiment=$EXP_NAME"
 echo "Python: $PYTHON"
@@ -188,6 +212,10 @@ echo "Pick-and-place: $PICKPLACE_REPO_ID (all episodes, per-task prompts)"
 echo "Collect-objects: $COLLECT_REPO_ID (existing SFT instruction and episode exclusions)"
 if [[ "${FR3_INCLUDE_DRAWER:-0}" == "1" ]]; then
     echo "Drawer: $DRAWER_ROOT (all nested LeRobot datasets and their task prompts)"
+fi
+if [[ "${FR3_SUPER_COTRAIN:-0}" == "1" ]]; then
+    echo "Additional drawer: $EXTRA_DRAWER_ROOT (all tasks and episodes)"
+    echo "Additional plate: $PLATE_ROOT (all tasks and episodes)"
 fi
 echo "Joint SFT: sample uniformly over eligible frames; shared state/action normalization."
 if [[ "${DRY_RUN:-0}" == "1" ]]; then

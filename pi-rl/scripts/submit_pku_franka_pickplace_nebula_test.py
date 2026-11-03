@@ -71,14 +71,17 @@ def test_each_variant_stages_correct_data_launcher_and_worker_resources(source_t
     assert launch["env"]["CKPT_BASE_DIR"] == "/oss/embodied-ai-data/pku/nebula_checkpoints"
     assert not {"GPUS", "FSDP_DEVICES", "BATCH_SIZE", "CUDA_VISIBLE_DEVICES"} & launch["env"].keys()
     assert launch["train_args"] == ["--num-train-steps", "12", "--num-workers", "0", "--save-interval", "10"]
-    if method in ("cotrain-sft", "cotrain3-sft"):
+    if method in ("cotrain-sft", "cotrain3-sft", "super-sft"):
         assert launch["env"]["PICKPLACE_REPO_ID"] == submit.PICKPLACE
         assert launch["env"]["COLLECT_REPO_ID"] == submit.COLLECT
         assert "REPO_ID" not in launch["env"]
     else:
         assert launch["env"]["REPO_ID"] == (submit.PICKPLACE_REWARDS if method == "iql" else submit.PICKPLACE)
-    if method == "cotrain3-sft":
+    if method in ("cotrain3-sft", "super-sft"):
         assert launch["env"]["DRAWER_ROOT"] == submit.DRAWER
+    if method == "super-sft":
+        assert launch["env"]["EXTRA_DRAWER_ROOT"] == submit.EXTRA_DRAWER
+        assert launch["env"]["PLATE_ROOT"] == submit.PLATE
     cluster = json.loads((stage / "cluster.json").read_text())
     assert cluster["worker"]["gpu"] == 200
     assert worker.training_command(stage, launch)[1] == str(stage / launch["launcher"])
@@ -90,7 +93,7 @@ def test_each_variant_stages_correct_data_launcher_and_worker_resources(source_t
     assert not (stage / "src/__pycache__").exists()
 
 
-@pytest.mark.parametrize("method", ["cotrain-sft", "cotrain3-sft"])
+@pytest.mark.parametrize("method", ["cotrain-sft", "cotrain3-sft", "super-sft"])
 def test_resume_overrides_and_skip_norm_use_the_matching_staged_assets(source_tree, tmp_path, method):
     config, asset = submit.VARIANTS[method][1:]
     stats_path = source_tree / "assets" / config / asset / "norm_stats.json"
@@ -121,7 +124,10 @@ def test_resume_overrides_and_skip_norm_use_the_matching_staged_assets(source_tr
             "/oss/custom/weights/params",
             "--ckpt-base-dir",
             "/oss/custom/checkpoints",
-            *(["--drawer-root", "/oss/custom/drawer"] if method == "cotrain3-sft" else []),
+            *(["--drawer-root", "/oss/custom/drawer"] if method in ("cotrain3-sft", "super-sft") else []),
+            *([
+                "--extra-drawer-root", "/oss/custom/new drawer", "--plate-root", "/oss/custom/new plate",
+            ] if method == "super-sft" else []),
         ]
     )
     launch = json.loads((stage / "nebula_launch.json").read_text())
@@ -131,8 +137,11 @@ def test_resume_overrides_and_skip_norm_use_the_matching_staged_assets(source_tr
     assert launch["env"]["COLLECT_REPO_ID"] == "/oss/custom/collect"
     assert launch["env"]["CKPT_BASE_DIR"] == "/oss/custom/checkpoints"
     assert launch["env"]["WEIGHT_PARAMS_PATH"] == "/oss/custom/weights/params"
-    if method == "cotrain3-sft":
+    if method in ("cotrain3-sft", "super-sft"):
         assert launch["env"]["DRAWER_ROOT"] == "/oss/custom/drawer"
+    if method == "super-sft":
+        assert launch["env"]["EXTRA_DRAWER_ROOT"] == "/oss/custom/new drawer"
+        assert launch["env"]["PLATE_ROOT"] == "/oss/custom/new plate"
     assert launch["train_args"][-1] == "--resume"
     assert (stage / "assets" / config / asset / "norm_stats.json").read_bytes() == stats_path.read_bytes()
     stats["state"]["mean"] = [0.0] * 20
@@ -151,6 +160,8 @@ def test_resume_overrides_and_skip_norm_use_the_matching_staged_assets(source_tr
         ["--num-workers", "-1"],
         ["--collect-repo-id", "/unused/collect"],
         ["--drawer-root", "/unused/drawer"],
+        ["--extra-drawer-root", "/unused/drawer"],
+        ["--plate-root", "/unused/plate"],
         ["--", "--data.repo-id", "/different/data"],
         ["--", "--overwrite"],
         ["--", "--resume"],

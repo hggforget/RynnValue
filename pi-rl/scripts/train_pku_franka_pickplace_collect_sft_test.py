@@ -28,6 +28,7 @@ CONFIG = "pi05_pku_franka_pickplace_collect_objects"
 ASSET = "pku_franka_pickplace_collect_objects"
 TRIPLE_CONFIG = "pi05_pku_franka_pickplace_collect_drawer"
 TRIPLE_ASSET = "pku_franka_pickplace_collect_drawer"
+SUPER_CONFIG = "pi05_pku_franka_super"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -346,15 +347,57 @@ def triple_repos(local_repos, tmp_path):
     return preset, repos, tuple(drawer_repos), expected
 
 
-def test_triple_sft_preserves_drawer_prompts_and_only_filters_collect(triple_repos):
-    preset, repos, drawer_repos, expected = triple_repos
+@pytest.fixture
+def super_repos(triple_repos, tmp_path):
+    base, repos, collection_repos, expected = triple_repos
+    expected = list(expected)
+    additional_roots = (tmp_path / "new drawer", tmp_path / "new plate")
+    extra_repos = []
+    prompts = ("Open the wooden drawer.", "Put the blue block on the yellow plate.")
+    for offset, (directory, prompt) in enumerate(zip(additional_roots, prompts, strict=True)):
+        root = directory if offset == 0 else directory / "blue-to-yellow/2026-11-03"
+        shutil.copytree(collection_repos[0], root)
+        extra_repos.append(str(root))
+        (root / "meta/tasks.jsonl").write_text(json.dumps({"task_index": 0, "task": prompt}) + "\n")
+        episodes = []
+        for episode in range(2):
+            path = root / f"data/chunk-000/episode_{episode:06d}.parquet"
+            table = pq.read_table(path)
+            for key in ("observation.state.cartesian", "observation.state.joints", "action"):
+                values = np.asarray(table[key].to_pylist(), dtype=np.float32) + 100 * (offset + 1)
+                if key == "action":
+                    values[:, -1] = 0.5
+                table = table.set_column(table.schema.get_field_index(key), key, pa.array(values.tolist()))
+            pq.write_table(table, path)
+            states = np.concatenate(
+                [np.asarray(table[key].to_pylist()) for key in (
+                    "observation.state.cartesian", "observation.state.gripper", "observation.state.joints",
+                )], axis=-1,
+            )
+            expected.append((states, np.asarray(table["action"].to_pylist()), prompt, offset + 4))
+            episodes.append({"episode_index": episode, "length": 4, "tasks": [prompt]})
+        (root / "meta/episodes.jsonl").write_text("".join(json.dumps(row) + "\n" for row in episodes))
+    preset = config.get_config(SUPER_CONFIG)
+    preset = dataclasses.replace(
+        preset, assets_base_dir=base.assets_base_dir,
+        data=dataclasses.replace(
+            preset.data, repo_ids=repos, dataset_root=base.data.dataset_root,
+            additional_dataset_roots=tuple(map(str, additional_roots)),
+        ),
+    )
+    return preset, repos, (*collection_repos, *extra_repos), expected
+
+
+@pytest.mark.parametrize("fixture_name", ["triple_repos", "super_repos"])
+def test_collection_sft_preserves_task_prompts_and_only_filters_collect(request, fixture_name):
+    preset, repos, drawer_repos, expected = request.getfixturevalue(fixture_name)
     data = preset.data.create(preset.assets_dirs, preset.model)
     assert data.repo_ids == (*repos, *drawer_repos)
     assert data.episode_ids == {repos[1]: (1, 3)}
     assert preset.iql is None
     dataset = data_loader.make_torch_dataset(data, 30, preset.model)
     transformed = data_loader.transform_dataset(dataset, data, skip_norm_stats=True)
-    assert len(dataset) == len(expected) * 4 == 32
+    assert len(dataset) == len(expected) * 4
     for episode, (states, actions, task, source) in enumerate(expected):
         for frame in (0, 3):
             sample = transformed[episode * 4 + frame]
@@ -369,20 +412,23 @@ def test_triple_sft_preserves_drawer_prompts_and_only_filters_collect(triple_rep
             assert "observation.capture_timestamp_ns" not in sample
 
 
-def test_triple_shared_norms_include_every_source(triple_repos, monkeypatch):
-    preset, repos, _, expected = triple_repos
+@pytest.mark.parametrize("fixture_name", ["triple_repos", "super_repos"])
+def test_shared_norms_include_every_collection(request, fixture_name, monkeypatch):
+    preset, repos, _, expected = request.getfixturevalue(fixture_name)
     monkeypatch.setattr(config, "get_config", lambda name: preset)
     norms.main(
-        TRIPLE_CONFIG, repo_ids=list(repos), dataset_root=preset.data.dataset_root, batch_size=1, num_workers=0,
+        preset.name, repo_ids=list(repos), dataset_root=preset.data.dataset_root, batch_size=1, num_workers=0,
+        additional_dataset_roots=getattr(preset.data, "additional_dataset_roots", None),
     )
-    stats = normalize.load(preset.assets_dirs / TRIPLE_ASSET)
+    stats = normalize.load(preset.assets_dirs / preset.data.assets.asset_id)
     states = np.concatenate([entry[0] for entry in expected])
     actions = np.concatenate(
         [values[np.minimum(frame + np.arange(30), 3)] for _, values, _, _ in expected for frame in range(4)]
     )
     for key, values in (("state", states), ("actions", actions)):
-        np.testing.assert_allclose(stats[key].mean, values.mean(axis=0, dtype=np.float64), atol=1e-5)
-        np.testing.assert_allclose(stats[key].std, values.std(axis=0, dtype=np.float64), atol=1e-5)
+        # Online batch moments use float32; allow its rounding at large fixture values.
+        np.testing.assert_allclose(stats[key].mean, values.mean(axis=0, dtype=np.float64), rtol=1e-6, atol=1e-5)
+        np.testing.assert_allclose(stats[key].std, values.std(axis=0, dtype=np.float64), rtol=1e-6, atol=1e-5)
     data = preset.data.create(preset.assets_dirs, preset.model)
     loader = data_loader.create_torch_data_loader(data, preset.model, 30, 4, num_batches=1)
     observation, actions = next(iter(loader))
@@ -416,8 +462,9 @@ def test_triple_config_rejects_invalid_drawer_data(triple_repos, tmp_path, chang
         factory.create(preset.assets_dirs, preset.model)
 
 
-def test_triple_serving_does_not_need_drawer_mounts(triple_repos, monkeypatch):
-    preset, _, _, _ = triple_repos
+@pytest.mark.parametrize("fixture_name", ["triple_repos", "super_repos"])
+def test_collection_serving_does_not_need_training_mounts(request, fixture_name, monkeypatch):
+    preset, _, _, _ = request.getfixturevalue(fixture_name)
     monkeypatch.setattr(policy, "validate_action_metadata", lambda *args: pytest.fail("Serving read dataset metadata"))
     factory = dataclasses.replace(
         preset.data, repo_ids=("/unmounted/pickplace", "/unmounted/collect"), dataset_root="/unmounted/drawer",
@@ -426,16 +473,24 @@ def test_triple_serving_does_not_need_drawer_mounts(triple_repos, monkeypatch):
     assert data.action_sequence_keys == ("action",)
 
 
-def test_triple_launcher_routes_identical_data_to_statistics_and_training(triple_repos, tmp_path, monkeypatch):
-    preset, repos, _, _ = triple_repos
+@pytest.mark.parametrize("fixture_name", ["triple_repos", "super_repos"])
+def test_collection_launcher_routes_identical_data_to_statistics_and_training(request, fixture_name, tmp_path, monkeypatch):
+    preset, repos, _, _ = request.getfixturevalue(fixture_name)
+    super_mode = fixture_name == "super_repos"
+    launcher = "train_sft_pku_franka_super.sh" if super_mode else "train_sft_pku_franka_pickplace_collect_drawer.sh"
     weights = tmp_path / "weights/params"
     weights.mkdir(parents=True)
     result = subprocess.run(
-        ["bash", str(ROOT / "scripts/train_sft_pku_franka_pickplace_collect_drawer.sh"), "--num-train-steps", "123"],
+        ["bash", str(ROOT / "scripts" / launcher), "--num-train-steps", "123"],
         env={
             **os.environ, "PYTHON": sys.executable, "PICKPLACE_REPO_ID": repos[0], "COLLECT_REPO_ID": repos[1],
             "DRAWER_ROOT": preset.data.dataset_root, "WEIGHT_PARAMS_PATH": str(weights),
             "GPUS": "0,1", "DRY_RUN": "1", "SKIP_NORM": "0", "FR3_INCLUDE_DRAWER": "0",
+            "FR3_SUPER_COTRAIN": "0",
+            **({
+                "EXTRA_DRAWER_ROOT": preset.data.additional_dataset_roots[0],
+                "PLATE_ROOT": preset.data.additional_dataset_roots[1],
+            } if super_mode else {}),
         },
         capture_output=True, text=True, check=False, timeout=30,
     )
@@ -444,14 +499,35 @@ def test_triple_launcher_routes_identical_data_to_statistics_and_training(triple
     assert norm_command[norm_command.index("--dataset-root") + 1] == preset.data.dataset_root
     assert train_command[train_command.index("--data.dataset-root") + 1] == preset.data.dataset_root
     parsed = tyro.extras.overridable_config_cli(
-        {TRIPLE_CONFIG: (TRIPLE_CONFIG, config.get_config(TRIPLE_CONFIG))},
-        args=train_command[train_command.index(TRIPLE_CONFIG):],
+        {preset.name: (preset.name, config.get_config(preset.name))},
+        args=train_command[train_command.index(preset.name):],
     )
     assert parsed.data.repo_ids == repos
     assert parsed.data.dataset_root == preset.data.dataset_root
     assert parsed.batch_size == 32
     assert parsed.fsdp_devices == 2
     assert parsed.num_train_steps == 123
+    if super_mode:
+        start = norm_command.index("--additional-dataset-roots") + 1
+        assert tuple(norm_command[start:start + 2]) == preset.data.additional_dataset_roots
+        assert parsed.data.additional_dataset_roots == preset.data.additional_dataset_roots
     monkeypatch.setattr(config, "get_config", lambda name: preset)
     tyro.cli(norms.main, args=norm_command[norm_command.index("scripts/compute_norm_stats_fast.py") + 1:])
-    assert (preset.assets_dirs / TRIPLE_ASSET / "norm_stats.json").is_file()
+    assert (preset.assets_dirs / preset.data.assets.asset_id / "norm_stats.json").is_file()
+
+
+@pytest.mark.parametrize("change", ["missing", "overlap", "fps"])
+def test_super_validates_additional_collections(super_repos, tmp_path, change):
+    preset, _, _, _ = super_repos
+    factory = preset.data
+    if change == "missing":
+        factory = dataclasses.replace(factory, additional_dataset_roots=(str(tmp_path / "missing"),))
+    elif change == "overlap":
+        factory = dataclasses.replace(factory, additional_dataset_roots=(factory.dataset_root,))
+    else:
+        path = Path(factory.additional_dataset_roots[0]) / "meta/info.json"
+        info = json.loads(path.read_text())
+        info["fps"] = 5
+        path.write_text(json.dumps(info))
+    with pytest.raises((ValueError, FileNotFoundError), match="not mounted|distinct datasets|30 Hz"):
+        factory.create(preset.assets_dirs, preset.model)
