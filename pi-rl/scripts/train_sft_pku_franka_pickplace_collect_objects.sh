@@ -98,9 +98,21 @@ else
 fi
 CONFIG=pi05_pku_franka_pickplace_collect_objects
 ASSET_ID=pku_franka_pickplace_collect_objects
+case "${FR3_INCLUDE_DRAWER:-0}" in
+    0) ;;
+    1) CONFIG=pi05_pku_franka_pickplace_collect_drawer; ASSET_ID=pku_franka_pickplace_collect_drawer ;;
+    *) echo "FR3_INCLUDE_DRAWER must be 0 or 1." >&2; exit 1 ;;
+esac
 PICKPLACE_REPO_ID="${PICKPLACE_REPO_ID:-/oss/embodied-ai-data/pku/fr3_real_pickplace_20261027_20261030_merged}"
 COLLECT_REPO_ID="${COLLECT_REPO_ID:-/oss/embodied-ai-data/pku/fr3_collect_objects_20261017_progress_expert_sup_step005000}"
 EXP_NAME="${EXP_NAME:-fr3_pickplace_collect_sft_$(date +%Y%m%d_%H%M%S)}"
+if [[ "${FR3_INCLUDE_DRAWER:-0}" == "1" ]]; then
+    DRAWER_ROOT="${DRAWER_ROOT:-/oss/embodied-ai-data/pku/fr3_drawer_20261102_03}"
+    if [[ ! -d "$DRAWER_ROOT" ]]; then
+        echo "Drawer data is not mounted at $DRAWER_ROOT; set DRAWER_ROOT to its local collection path." >&2
+        exit 1
+    fi
+fi
 CKPT_BASE_DIR="${CKPT_BASE_DIR:-./checkpoints}"
 WEIGHT_PARAMS_PATH="${WEIGHT_PARAMS_PATH:-/oss/embodied-ai-data/pku/pi05_base/params}"
 
@@ -164,12 +176,19 @@ TRAIN_ARGS=(
     --weight-loader.params-path "$WEIGHT_PARAMS_PATH"
     --fsdp-devices "$FSDP_DEVICES"
     --batch-size "$BATCH_SIZE"
-    "$@"
 )
+if [[ "${FR3_INCLUDE_DRAWER:-0}" == "1" ]]; then
+    NORM_ARGS+=(--dataset-root "$DRAWER_ROOT")
+    TRAIN_ARGS+=(--data.dataset-root "$DRAWER_ROOT")
+fi
+TRAIN_ARGS+=("$@")
 echo "Starting $CONFIG: GPUs=$GPUS, FSDP=$FSDP_DEVICES, global_batch=$BATCH_SIZE, experiment=$EXP_NAME"
 echo "Python: $PYTHON"
 echo "Pick-and-place: $PICKPLACE_REPO_ID (all episodes, per-task prompts)"
 echo "Collect-objects: $COLLECT_REPO_ID (existing SFT instruction and episode exclusions)"
+if [[ "${FR3_INCLUDE_DRAWER:-0}" == "1" ]]; then
+    echo "Drawer: $DRAWER_ROOT (all nested LeRobot datasets and their task prompts)"
+fi
 echo "Joint SFT: sample uniformly over eligible frames; shared state/action normalization."
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     if [[ "${SKIP_NORM:-0}" != "1" ]]; then

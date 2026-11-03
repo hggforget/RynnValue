@@ -55,6 +55,33 @@ Python 自动发现、`BATCH_SIZE_PER_GPU`、`FSDP_DEVICES`、`WEIGHT_PARAMS_PAT
 直接调用统计脚本时使用 `--repo-ids <pickplace路径> <collect路径>`，
 直接训练时对应 `--data.repo-ids <pickplace路径> <collect路径>`。
 
+三路数据共同做 SFT 使用 `pi05_pku_franka_pickplace_collect_drawer`：
+
+```bash
+GPUS=0,1 bash scripts/train_sft_pku_franka_pickplace_collect_drawer.sh
+GPUS=0 DRY_RUN=1 bash scripts/train_sft_pku_franka_pickplace_collect_drawer.sh
+```
+
+第三路默认是 `/oss/embodied-ai-data/pku/fr3_drawer_20261102_03`；自动发现其中全部 18 个
+LeRobot 子数据集，保留 125 条轨迹及开关抽屉、放置物块等任务各自的指令。无需预先合并或解压 `.tar`。
+前两路路径和 collect-objects 筛选保持上述两路版本的约定，三路统一使用 30 Hz、双相机、
+14 维实测状态、7 维绝对动作和 30 帧动作块，按有效帧均匀采样，共用 SFT 损失。
+drawer 的深度、采集时间戳、相对动作以及 progress/reward 字段不作为模型输入。
+
+通过 `DRAWER_ROOT` 覆盖第三路路径（也支持已经合并的单个 LeRobot 数据集）；
+`PICKPLACE_REPO_ID`、`COLLECT_REPO_ID` 继续覆盖前两路。统计和训练采用同一套路径及筛选。
+共享统计独立写入 `assets/pi05_pku_franka_pickplace_collect_drawer/pku_franka_pickplace_collect_drawer/norm_stats.json`，
+checkpoint 位于 `checkpoints/pi05_pku_franka_pickplace_collect_drawer/<EXP_NAME>/`。
+其余 GPU、batch、Python 自动发现和续训选项与两路版本一致。
+
+星云入口支持三路版本，预览不提交作业：
+
+```bash
+bash submit_to_nebula_pku_franka_pickplace.sh --method cotrain3-sft --dry-run
+```
+
+实际提交去掉 `--dry-run`；可通过 `--drawer-root` 覆盖第三路根目录。
+
 带奖励标注的 pick-and-place 使用 `pi05_pku_franka_pickplace_iql`：
 
 ```bash
@@ -87,7 +114,7 @@ critic/value 学习率 `3e-4`，expectile 为 `0.8`，优势权重为 `min(exp(Q
 IQL 统计单独保存在 `assets/pi05_pku_franka_pickplace_iql/pku_franka_pickplace/norm_stats.json`，
 checkpoint 保存在 `checkpoints/pi05_pku_franka_pickplace_iql/<EXP_NAME>/`。
 
-以上三个 pick-and-place 版本都支持星云提交。在 `pi-rl` 目录运行：
+以上 pick-and-place 版本都支持星云提交。在 `pi-rl` 目录运行：
 
 ```bash
 # 预览源码快照、资源和训练参数，不创建作业：

@@ -138,12 +138,14 @@ class PkuFrankaCollectInputs:
 
 @dataclasses.dataclass(frozen=True)
 class PkuFrankaPickplaceCollectInputs(PkuFrankaCollectInputs):
-    """Repo 0 keeps pick-and-place tasks; repo 1 uses the collect-objects SFT instruction."""
+    """Repo 1 uses the collect instruction; other repos keep their task prompts."""
+
+    allow_additional_datasets: bool = False
 
     def __call__(self, data: dict) -> dict:
         if "dataset_index" in data:
             dataset_index = int(np.asarray(data["dataset_index"]).item())
-            if dataset_index not in (0, 1):
+            if dataset_index < 0 or (not self.allow_additional_datasets and dataset_index > 1):
                 raise ValueError("FR3 pickplace/collect SFT requires dataset_index 0 or 1")
             if dataset_index == 1:
                 data = {**data, "prompt": EXPERT_COLLECT_OBJECTS_PROMPT}

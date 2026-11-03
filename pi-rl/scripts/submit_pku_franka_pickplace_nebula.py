@@ -22,6 +22,7 @@ DATA_ROOT = "/oss/embodied-ai-data/pku/"
 PICKPLACE = DATA_ROOT + "fr3_real_pickplace_20261027_20261030_merged"
 PICKPLACE_REWARDS = PICKPLACE + "_progress_expert_sup_step025000_on_vlm4b90k"
 COLLECT = DATA_ROOT + "fr3_collect_objects_20261017_progress_expert_sup_step005000"
+DRAWER = DATA_ROOT + "fr3_drawer_20261102_03"
 VARIANTS = {
     "sft": ("scripts/train_sft_pku_franka_pickplace.sh", "pi05_pku_franka_pickplace", "pku_franka_pickplace"),
     "iql": ("scripts/train_iql_pku_franka_pickplace.sh", "pi05_pku_franka_pickplace_iql", "pku_franka_pickplace"),
@@ -29,6 +30,11 @@ VARIANTS = {
         "scripts/train_sft_pku_franka_pickplace_collect_objects.sh",
         "pi05_pku_franka_pickplace_collect_objects",
         "pku_franka_pickplace_collect_objects",
+    ),
+    "cotrain3-sft": (
+        "scripts/train_sft_pku_franka_pickplace_collect_drawer.sh",
+        "pi05_pku_franka_pickplace_collect_drawer",
+        "pku_franka_pickplace_collect_drawer",
     ),
 }
 
@@ -93,7 +99,8 @@ def main(argv=None):
     parser.add_argument("--queue", default="damo_eai_rfm_l20z")
     parser.add_argument("--algo-name", default="pytorch271")
     parser.add_argument("--repo-id", help="Pick-and-place path; IQL defaults to the expert-labeled dataset.")
-    parser.add_argument("--collect-repo-id", help="Collect-objects path for --method cotrain-sft.")
+    parser.add_argument("--collect-repo-id", help="Collect-objects path for cotrain-sft / cotrain3-sft.")
+    parser.add_argument("--drawer-root", help="Drawer collection root for --method cotrain3-sft.")
     parser.add_argument("--weight-params-path", default=DATA_ROOT + "pi05_base/params")
     parser.add_argument("--ckpt-base-dir", default=DATA_ROOT + "nebula_checkpoints")
     parser.add_argument("--openpi-data-home", default=DATA_ROOT + "openpi_cache")
@@ -121,8 +128,10 @@ def main(argv=None):
         parser.error("Batch size and steps must be positive; workers must be nonnegative.")
     if args.resume and not args.exp_name:
         parser.error("--resume requires the original --exp-name")
-    if args.collect_repo_id is not None and args.method != "cotrain-sft":
-        parser.error("--collect-repo-id requires --method cotrain-sft")
+    if args.collect_repo_id is not None and args.method not in ("cotrain-sft", "cotrain3-sft"):
+        parser.error("--collect-repo-id requires --method cotrain-sft or cotrain3-sft")
+    if args.drawer_root is not None and args.method != "cotrain3-sft":
+        parser.error("--drawer-root requires --method cotrain3-sft")
     extra = args.train_args[1:] if args.train_args[:1] == ["--"] else args.train_args
     for flag in extra:
         if flag.replace("_", "-").startswith(
@@ -158,10 +167,12 @@ def main(argv=None):
         "TOKENIZERS_PARALLELISM": "false",
     }
     repo = args.repo_id or (PICKPLACE_REWARDS if args.method == "iql" else PICKPLACE)
-    if args.method == "cotrain-sft":
+    if args.method in ("cotrain-sft", "cotrain3-sft"):
         env.update(PICKPLACE_REPO_ID=repo, COLLECT_REPO_ID=args.collect_repo_id or COLLECT)
     else:
         env["REPO_ID"] = repo
+    if args.method == "cotrain3-sft":
+        env["DRAWER_ROOT"] = args.drawer_root or DRAWER
     if args.pip_index_url:
         env["PIP_INDEX_URL"] = args.pip_index_url
     if args.wheelhouse is not None:

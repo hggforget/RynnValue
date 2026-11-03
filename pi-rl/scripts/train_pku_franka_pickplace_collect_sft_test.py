@@ -26,6 +26,8 @@ from . import compute_norm_stats_fast as norms
 
 CONFIG = "pi05_pku_franka_pickplace_collect_objects"
 ASSET = "pku_franka_pickplace_collect_objects"
+TRIPLE_CONFIG = "pi05_pku_franka_pickplace_collect_drawer"
+TRIPLE_ASSET = "pku_franka_pickplace_collect_drawer"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -293,3 +295,163 @@ def test_launcher_and_norm_cli_use_identical_ordered_repos(local_repos, tmp_path
     monkeypatch.setattr(config, "get_config", lambda name: preset)
     tyro.cli(norms.main, args=norm_args)
     assert (preset.assets_dirs / ASSET / "norm_stats.json").is_file()
+
+
+@pytest.fixture
+def triple_repos(local_repos, tmp_path):
+    base, repos, expected = local_repos
+    expected = list(expected)
+    drawer_root = tmp_path / "drawer collection"
+    drawer_repos = []
+    for offset, name in enumerate(("close", "open")):
+        root = drawer_root / f"drawer-{name}" / "2026-11-03"
+        shutil.copytree(repos[0], root)
+        drawer_repos.append(str(root))
+        prompt = f"{name.capitalize()} the white drawer."
+        info_path = root / "meta/info.json"
+        info = json.loads(info_path.read_text())
+        info["total_tasks"] = 1
+        info["features"]["observation.capture_timestamp_ns"] = {"dtype": "int64", "shape": [1]}
+        info["features"]["action.relative"] = {"dtype": "float32", "shape": [7]}
+        info_path.write_text(json.dumps(info))
+        (root / "meta/tasks.jsonl").write_text(json.dumps({"task_index": 0, "task": prompt}) + "\n")
+        episodes = []
+        for episode in range(2):
+            path = root / f"data/chunk-000/episode_{episode:06d}.parquet"
+            table = pq.read_table(path)
+            for key in ("observation.state.cartesian", "observation.state.joints", "action"):
+                values = np.asarray(table[key].to_pylist(), dtype=np.float32) + 20 * (offset + 1)
+                if key == "action":
+                    values[:, -1] = 0.5  # Preserve the normalized gripper command.
+                table = table.set_column(table.schema.get_field_index(key), key, pa.array(values.tolist()))
+            table = table.set_column(table.schema.get_field_index("task_index"), "task_index", pa.array([0] * 4))
+            table = table.append_column("observation.capture_timestamp_ns", pa.array([1000] * 4))
+            table = table.append_column("action.relative", pa.array([[float("nan")] * 7] * 4))
+            pq.write_table(table, path)
+            states = np.concatenate(
+                [np.asarray(table[key].to_pylist()) for key in (
+                    "observation.state.cartesian", "observation.state.gripper", "observation.state.joints",
+                )],
+                axis=-1,
+            )
+            expected.append((states, np.asarray(table["action"].to_pylist()), prompt, offset + 2))
+            episodes.append({"episode_index": episode, "length": 4, "tasks": [prompt]})
+        (root / "meta/episodes.jsonl").write_text("".join(json.dumps(row) + "\n" for row in episodes))
+    preset = config.get_config(TRIPLE_CONFIG)
+    preset = dataclasses.replace(
+        preset,
+        assets_base_dir=base.assets_base_dir,
+        data=dataclasses.replace(preset.data, repo_ids=repos, dataset_root=str(drawer_root)),
+    )
+    return preset, repos, tuple(drawer_repos), expected
+
+
+def test_triple_sft_preserves_drawer_prompts_and_only_filters_collect(triple_repos):
+    preset, repos, drawer_repos, expected = triple_repos
+    data = preset.data.create(preset.assets_dirs, preset.model)
+    assert data.repo_ids == (*repos, *drawer_repos)
+    assert data.episode_ids == {repos[1]: (1, 3)}
+    assert preset.iql is None
+    dataset = data_loader.make_torch_dataset(data, 30, preset.model)
+    transformed = data_loader.transform_dataset(dataset, data, skip_norm_stats=True)
+    assert len(dataset) == len(expected) * 4 == 32
+    for episode, (states, actions, task, source) in enumerate(expected):
+        for frame in (0, 3):
+            sample = transformed[episode * 4 + frame]
+            np.testing.assert_array_equal(sample["state"][:14], states[frame])
+            np.testing.assert_array_equal(sample["actions"][:, :7], actions[np.minimum(frame + np.arange(30), 3)])
+            assert not sample["actions"][:, 7:].any()
+            text = "".join(chr(int(value)) for value in sample["tokenized_prompt"][sample["tokenized_prompt_mask"]])
+            assert text == (policy.EXPERT_COLLECT_OBJECTS_PROMPT if source == 1 else task)
+            assert set(sample["image"]) == {"base_0_rgb", "left_wrist_0_rgb"}
+            assert "progress" not in sample
+            assert "action.relative" not in sample
+            assert "observation.capture_timestamp_ns" not in sample
+
+
+def test_triple_shared_norms_include_every_source(triple_repos, monkeypatch):
+    preset, repos, _, expected = triple_repos
+    monkeypatch.setattr(config, "get_config", lambda name: preset)
+    norms.main(
+        TRIPLE_CONFIG, repo_ids=list(repos), dataset_root=preset.data.dataset_root, batch_size=1, num_workers=0,
+    )
+    stats = normalize.load(preset.assets_dirs / TRIPLE_ASSET)
+    states = np.concatenate([entry[0] for entry in expected])
+    actions = np.concatenate(
+        [values[np.minimum(frame + np.arange(30), 3)] for _, values, _, _ in expected for frame in range(4)]
+    )
+    for key, values in (("state", states), ("actions", actions)):
+        np.testing.assert_allclose(stats[key].mean, values.mean(axis=0, dtype=np.float64), atol=1e-5)
+        np.testing.assert_allclose(stats[key].std, values.std(axis=0, dtype=np.float64), atol=1e-5)
+    data = preset.data.create(preset.assets_dirs, preset.model)
+    loader = data_loader.create_torch_data_loader(data, preset.model, 30, 4, num_batches=1)
+    observation, actions = next(iter(loader))
+    assert observation.state.shape == (4, 32)
+    assert actions.shape == (4, 30, 32)
+    assert np.isfinite(observation.state).all()
+    assert np.isfinite(actions).all()
+
+
+@pytest.mark.parametrize("change", ["empty", "duplicate", "fps", "camera", "action"])
+def test_triple_config_rejects_invalid_drawer_data(triple_repos, tmp_path, change):
+    preset, repos, drawer_repos, _ = triple_repos
+    factory = preset.data
+    if change == "empty":
+        empty = tmp_path / "empty drawer"
+        empty.mkdir()
+        factory = dataclasses.replace(factory, dataset_root=str(empty))
+    elif change == "duplicate":
+        factory = dataclasses.replace(factory, dataset_root=repos[0])
+    else:
+        path = Path(drawer_repos[0]) / "meta/info.json"
+        info = json.loads(path.read_text())
+        if change == "fps":
+            info["fps"] = 5
+        elif change == "camera":
+            del info["features"]["observation.images.wrist"]
+        else:
+            info["features"]["action"]["representation"] = "relative_delta_pose"
+        path.write_text(json.dumps(info))
+    with pytest.raises(ValueError, match="No LeRobot|distinct datasets|30 Hz|camera|absolute_target_pose"):
+        factory.create(preset.assets_dirs, preset.model)
+
+
+def test_triple_serving_does_not_need_drawer_mounts(triple_repos, monkeypatch):
+    preset, _, _, _ = triple_repos
+    monkeypatch.setattr(policy, "validate_action_metadata", lambda *args: pytest.fail("Serving read dataset metadata"))
+    factory = dataclasses.replace(
+        preset.data, repo_ids=("/unmounted/pickplace", "/unmounted/collect"), dataset_root="/unmounted/drawer",
+    )
+    data = factory.create_for_inference(preset.assets_dirs, preset.model)
+    assert data.action_sequence_keys == ("action",)
+
+
+def test_triple_launcher_routes_identical_data_to_statistics_and_training(triple_repos, tmp_path, monkeypatch):
+    preset, repos, _, _ = triple_repos
+    weights = tmp_path / "weights/params"
+    weights.mkdir(parents=True)
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/train_sft_pku_franka_pickplace_collect_drawer.sh"), "--num-train-steps", "123"],
+        env={
+            **os.environ, "PYTHON": sys.executable, "PICKPLACE_REPO_ID": repos[0], "COLLECT_REPO_ID": repos[1],
+            "DRAWER_ROOT": preset.data.dataset_root, "WEIGHT_PARAMS_PATH": str(weights),
+            "GPUS": "0,1", "DRY_RUN": "1", "SKIP_NORM": "0", "FR3_INCLUDE_DRAWER": "0",
+        },
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    norm_command, train_command = [shlex.split(line) for line in result.stdout.splitlines()[-2:]]
+    assert norm_command[norm_command.index("--dataset-root") + 1] == preset.data.dataset_root
+    assert train_command[train_command.index("--data.dataset-root") + 1] == preset.data.dataset_root
+    parsed = tyro.extras.overridable_config_cli(
+        {TRIPLE_CONFIG: (TRIPLE_CONFIG, config.get_config(TRIPLE_CONFIG))},
+        args=train_command[train_command.index(TRIPLE_CONFIG):],
+    )
+    assert parsed.data.repo_ids == repos
+    assert parsed.data.dataset_root == preset.data.dataset_root
+    assert parsed.batch_size == 32
+    assert parsed.fsdp_devices == 2
+    assert parsed.num_train_steps == 123
+    monkeypatch.setattr(config, "get_config", lambda name: preset)
+    tyro.cli(norms.main, args=norm_command[norm_command.index("scripts/compute_norm_stats_fast.py") + 1:])
+    assert (preset.assets_dirs / TRIPLE_ASSET / "norm_stats.json").is_file()

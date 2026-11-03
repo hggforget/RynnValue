@@ -1143,29 +1143,69 @@ class LeRobotPkuFrankaPickplaceCollectDataConfig(MultiDataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
-        import json
-
         data = self.create_for_inference(assets_dirs, model_config)
         for repo in self.repo_ids:
-            pku_franka_collect_policy.validate_action_metadata(repo, "absolute")
-            info_path = pathlib.Path(repo) / "meta/info.json"
-            if not info_path.is_file():
-                continue
-            info = json.loads(info_path.read_text())
-            if info["fps"] != 30:
-                raise ValueError(f"FR3 joint SFT requires 30 Hz data: {repo}")
-            for key, shape in (
-                ("observation.state.cartesian", [6]), ("observation.state.gripper", [1]),
-                ("observation.state.joints", [7]), ("action", [7]),
-            ):
-                if info["features"].get(key, {}).get("shape") != shape:
-                    raise ValueError(f"FR3 joint SFT requires {key} with shape {shape}: {repo}")
-            for key in ("observation.images.primary", "observation.images.wrist"):
-                if info["features"].get(key, {}).get("dtype") != "video":
-                    raise ValueError(f"FR3 joint SFT requires both camera videos: {repo}")
+            self._validate_repo(repo)
         collect_repo = self.repo_ids[1]
         kept = pku_franka_collect_policy.training_episode_ids(collect_repo, self.excluded_collect_episode_ids)
         return dataclasses.replace(data, episode_ids={collect_repo: kept} if kept is not None else None)
+
+    @staticmethod
+    def _validate_repo(repo: str) -> None:
+        import json
+
+        pku_franka_collect_policy.validate_action_metadata(repo, "absolute")
+        info_path = pathlib.Path(repo) / "meta/info.json"
+        if not info_path.is_file():
+            return
+        info = json.loads(info_path.read_text())
+        if info["fps"] != 30:
+            raise ValueError(f"FR3 joint SFT requires 30 Hz data: {repo}")
+        for key, shape in (
+            ("observation.state.cartesian", [6]), ("observation.state.gripper", [1]),
+            ("observation.state.joints", [7]), ("action", [7]),
+        ):
+            if info["features"].get(key, {}).get("shape") != shape:
+                raise ValueError(f"FR3 joint SFT requires {key} with shape {shape}: {repo}")
+        for key in ("observation.images.primary", "observation.images.wrist"):
+            if info["features"].get(key, {}).get("dtype") != "video":
+                raise ValueError(f"FR3 joint SFT requires both camera videos: {repo}")
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPkuFrankaPickplaceCollectDrawerDataConfig(LeRobotPkuFrankaPickplaceCollectDataConfig):
+    """Three-source SFT; discover every LeRobot dataset under the drawer root."""
+
+    dataset_root: str = "/oss/embodied-ai-data/pku/fr3_drawer_20261102_03"
+
+    @override
+    def create_for_inference(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
+        data = super().create_for_inference(assets_dirs, model_config)
+        return dataclasses.replace(
+            data,
+            data_transforms=_transforms.Group(
+                inputs=[pku_franka_collect_policy.PkuFrankaPickplaceCollectInputs(allow_additional_datasets=True)],
+                outputs=[pku_franka_collect_policy.PkuFrankaCollectOutputs()],
+            ),
+        )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
+        data = super().create(assets_dirs, model_config)
+        root = pathlib.Path(self.dataset_root)
+        if not root.is_dir():
+            raise FileNotFoundError(f"Drawer dataset root is not mounted: {root}")
+        info_paths = [root / "meta/info.json"] if (root / "meta/info.json").is_file() else sorted(root.rglob("meta/info.json"))
+        if not info_paths:
+            raise ValueError(f"No LeRobot datasets found under drawer root: {root}")
+        drawer_repos = tuple(str(path.parent.parent) for path in info_paths)
+        repos = (*data.repo_ids, *drawer_repos)
+        if len({pathlib.Path(repo).resolve() for repo in repos}) != len(repos):
+            raise ValueError("FR3 triple SFT requires distinct datasets; drawer data overlaps another source")
+        for repo in drawer_repos:
+            self._validate_repo(repo)
+        logging.info("FR3 triple SFT: pickplace + collect-objects + %d drawer datasets", len(drawer_repos))
+        return dataclasses.replace(data, repo_ids=repos)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2678,6 +2718,18 @@ _CONFIGS = [
         data=LeRobotPkuFrankaPickplaceCollectDataConfig(
             repo_id="pku_franka_pickplace_collect_objects",
             assets=AssetsConfig(asset_id="pku_franka_pickplace_collect_objects"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
+        checkpoint_base_dir="./checkpoints",
+    ),
+    TrainConfig(
+        **_COLLECT_OBJECTS_SFT_HYPERPARAMS,
+        name="pi05_pku_franka_pickplace_collect_drawer",
+        num_workers=4,
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+        data=LeRobotPkuFrankaPickplaceCollectDrawerDataConfig(
+            repo_id="pku_franka_pickplace_collect_drawer",
+            assets=AssetsConfig(asset_id="pku_franka_pickplace_collect_drawer"),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
         checkpoint_base_dir="./checkpoints",
