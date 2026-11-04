@@ -202,6 +202,9 @@ def main(
     advantage_lambda: float | None = None,
     repo_ids: list[str] | None = None,
     additional_dataset_roots: list[str] | None = None,
+    validation_fraction: float | None = None,
+    split_seed: int | None = None,
+    include_noted_episodes: bool | None = None,
 ):
     """Compute norm stats fast.
 
@@ -215,6 +218,9 @@ def main(
         dataset_root: Optional collection-root override for factories exposing dataset_root.
         additional_dataset_roots: Additional collection roots for the FR3 super SFT factory;
             must match training --data.additional-dataset-roots.
+        validation_fraction: FR3 prompt split fraction; must match training.
+        split_seed: FR3 prompt episode split seed; must match training.
+        include_noted_episodes: Override the FR3 prompt quality filter; must match training.
         num_workers: PyTorch DataLoader worker processes. Default ``min(16, cpu_count)``.
             The stock script uses ``TrainConfig.num_workers`` which is typically 2.
         batch_size: Loader batch size. Default ``TrainConfig.batch_size``.
@@ -242,6 +248,15 @@ def main(
             raise ValueError("Use a nonempty --repo-ids list without --repo-id")
         config = dataclasses.replace(config, data=dataclasses.replace(config.data, repo_ids=tuple(repo_ids)))
     data = config.data
+    for field, value in (
+        ("validation_fraction", validation_fraction),
+        ("split_seed", split_seed),
+        ("include_noted_episodes", include_noted_episodes),
+    ):
+        if value is not None:
+            if not hasattr(data, field):
+                raise ValueError(f"Config {config_name} does not support {field}")
+            data = dataclasses.replace(data, **{field: value})
     for field, value in (
         ("advantage_criterion", advantage_criterion),
         ("advantage_horizon", advantage_horizon),

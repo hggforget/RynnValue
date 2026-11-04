@@ -111,6 +111,74 @@ bash submit_to_nebula_pku_franka_pickplace.sh --method super-sft --dry-run
 checkpoint 位于 `checkpoints/pi05_pku_franka_super/<EXP_NAME>/`。
 续训使用原 `EXP_NAME` 和 `--resume`，已有正确统计时可加 `SKIP_NORM=1`。
 
+多粒度 Prompt 增强使用独立配置 `pi05_pku_franka_pickplace_prompt_aug`：
+
+```bash
+# 在 pi-rl 目录运行；自动发现训练 Python 和 GPU。
+bash scripts/train_sft_pku_franka_pickplace_prompt_aug.sh
+GPUS=0,1 DRY_RUN=1 bash scripts/train_sft_pku_franka_pickplace_prompt_aug.sh
+# 完整细粒度 Prompt 对照组：相同数据、划分、采样器、模型和训练预算。
+CONFIG_NAME=pi05_pku_franka_pickplace_prompt_baseline bash scripts/train_sft_pku_franka_pickplace_prompt_aug.sh
+# 星云 8 卡启动（预览时追加 --dry-run）：
+bash submit_to_nebula_pku_franka_pickplace.sh --method prompt-aug-sft --gpus 8
+# 星云完整 Prompt 对照组：
+bash submit_to_nebula_pku_franka_pickplace.sh --method prompt-baseline-sft --gpus 8
+```
+
+默认读取合并的 10 月 27—30 日放盘子数据、`fr3_plate_20261103` 和
+`fr3_drawer_20261102_03`，只选择 `fine_task.kind=pick_place` 的盘子/抽屉轨迹。
+不混入 collect-objects、开关抽屉和未切分的长交互记录。
+当前挂载快照有 293 条盘子、65 条抽屉记录；方案提及的另外 3 条抽屉记录尚未包含其中。
+默认排除非空 `note` 的 5 条盘子、9 条抽屉记录，剩余 344 条候选，再划分训练/验证集。
+这是原始示教数；在线 Prompt 变体不计为独立示教，也不复制视频或动作。
+
+每个样本先等概率选择一个原始 episode，再在该 episode 内均匀选择帧，并重新采样 Prompt：
+
+- 盘子：按指定属性数量 0/1/2/3，以 20%/30%/30%/20% 采样，同一档的组合等概率，共 8 类。
+- 抽屉：只对物体颜色和形状做省略，按 0/1/2 个属性以 20%/60%/20% 采样，共 4 类。
+- 完整属性档保留原始完整 Prompt；其余英文模板只删除属性，颜色、形状和目标类型均来自 `fine_task`。
+- `rectangular` 与 `flat_rectangular` 分开保留；抽屉轨迹始终描述为放入抽屉。
+
+按 `(source_dataset, source_episode_index)` 和固定 seed 的哈希，在任何 Prompt 增强之前
+划分 90%/10% 的训练/验证集；比例是确定性的哈希阈值，数量不保证精确等于 10%。
+同一来源 episode 的全部帧和 Prompt 变体只属于一侧；重叠数据根目录或重复来源 episode 会报错。
+统计只扫描训练侧所有帧，不包含验证集。验证侧默认使用固定的完整 Prompt，不进行随机增强。
+模型仍是双相机、14 维实测状态、7 维绝对动作、30 帧动作块，默认从 `pi05_base` 训练 20,000 步。
+当前管线要求这些输入数据共享 30 的标称视频 FPS；这不等于实际控制频率，
+本配置不重写采集时间戳，也不对视频、状态或动作额外重采样。
+
+通过 `PICKPLACE_REPO_ID`、`PLATE_ROOT`、`DRAWER_ROOT` 覆盖三路数据位置，
+`VALIDATION_FRACTION`、`SPLIT_SEED` 调整 episode 划分。
+人工复核后需要纳入带备注记录时，设置 `INCLUDE_NOTED_EPISODES=1`；统计与训练同步使用这些选项。
+改变源数据、划分或质量筛选后应重新计算统计，不使用旧的 `SKIP_NORM=1` 结果。
+独立统计和可追溯清单位于：
+
+```text
+assets/<配置名>/pku_franka_pickplace_prompt_aug/norm_stats.json
+assets/<配置名>/pku_franka_pickplace_prompt_aug/prompt_episodes.json
+```
+
+清单保留来源数据集、日期、原 episode ID、原始 `fine_task`、完整 Prompt、场景和备注，
+包括 `excluded_note` 和 `validation` 记录。缺少 `fine_task` 的记录不会从文字或外观中自动推断属性。
+如有额外已挂载的兼容数据集，可直接通过训练 CLI 的 `--data.repo-ids` 提供全部根目录，
+计算统计时使用相同的 `--repo-ids`，并保持 `--validation-fraction`、`--split-seed`、
+`--include-noted-episodes` 与训练配置一致。
+
+离线构建完整 Prompt 验证 loader（复用训练侧的归一化统计）：
+
+```python
+import dataclasses
+from openpi.training import config, data_loader
+
+cfg = config.get_config("pi05_pku_franka_pickplace_prompt_aug")
+cfg = dataclasses.replace(cfg, data=dataclasses.replace(cfg.data, split="validation"))
+loader = data_loader.create_data_loader(cfg, shuffle=False, num_batches=1)
+```
+
+推理时直接传自由语言，训练数据根目录无需挂载，也不会随机改写用户指令。
+实机评测应按完整、各类部分属性和通用指令分组，并按有无干扰物分别统计；
+粗指令选择任意满足约束的物体和目标即符合语义，不要求复现示教中的唯一选择。
+
 带奖励标注的 pick-and-place 使用 `pi05_pku_franka_pickplace_iql`：
 
 ```bash

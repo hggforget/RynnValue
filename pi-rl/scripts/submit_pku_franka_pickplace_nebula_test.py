@@ -71,7 +71,17 @@ def test_each_variant_stages_correct_data_launcher_and_worker_resources(source_t
     assert launch["env"]["CKPT_BASE_DIR"] == "/oss/embodied-ai-data/pku/nebula_checkpoints"
     assert not {"GPUS", "FSDP_DEVICES", "BATCH_SIZE", "CUDA_VISIBLE_DEVICES"} & launch["env"].keys()
     assert launch["train_args"] == ["--num-train-steps", "12", "--num-workers", "0", "--save-interval", "10"]
-    if method in ("cotrain-sft", "cotrain3-sft", "super-sft"):
+    if method in submit.PROMPT_METHODS:
+        assert launch["env"]["PICKPLACE_REPO_ID"] == submit.PICKPLACE
+        assert launch["env"]["PLATE_ROOT"] == submit.PLATE
+        assert launch["env"]["DRAWER_ROOT"] == submit.DRAWER
+        assert launch["env"]["CONFIG_NAME"] == submit.VARIANTS[method][1]
+        assert launch["env"]["VALIDATION_FRACTION"] == "0.1"
+        assert launch["env"]["SPLIT_SEED"] == "42"
+        assert launch["env"]["INCLUDE_NOTED_EPISODES"] == "0"
+        assert "COLLECT_REPO_ID" not in launch["env"]
+        assert "REPO_ID" not in launch["env"]
+    elif method in ("cotrain-sft", "cotrain3-sft", "super-sft"):
         assert launch["env"]["PICKPLACE_REPO_ID"] == submit.PICKPLACE
         assert launch["env"]["COLLECT_REPO_ID"] == submit.COLLECT
         assert "REPO_ID" not in launch["env"]
@@ -91,6 +101,39 @@ def test_each_variant_stages_correct_data_launcher_and_worker_resources(source_t
     assert not (stage / ".aws").exists()
     assert not (stage / "core-python-123").exists()
     assert not (stage / "src/__pycache__").exists()
+
+
+@pytest.mark.parametrize("method", submit.PROMPT_METHODS)
+def test_prompt_sft_stages_matching_sources_and_split_settings(source_tree, tmp_path, method):
+    stage = tmp_path / "prompt-stage"
+    submit.main(
+        [
+            "--method",
+            method,
+            "--dry-run",
+            "--skip-local-preflight",
+            "--stage-dir",
+            str(stage),
+            "--repo-id",
+            "/oss/custom/pickplace",
+            "--plate-root",
+            "/oss/custom/plate",
+            "--drawer-root",
+            "/oss/custom/drawer",
+            "--validation-fraction",
+            "0.2",
+            "--split-seed",
+            "7",
+            "--include-noted-episodes",
+        ]
+    )
+    env = json.loads((stage / "nebula_launch.json").read_text())["env"]
+    assert env["PICKPLACE_REPO_ID"] == "/oss/custom/pickplace"
+    assert env["PLATE_ROOT"] == "/oss/custom/plate"
+    assert env["DRAWER_ROOT"] == "/oss/custom/drawer"
+    assert env["VALIDATION_FRACTION"] == "0.2"
+    assert env["SPLIT_SEED"] == "7"
+    assert env["INCLUDE_NOTED_EPISODES"] == "1"
 
 
 @pytest.mark.parametrize("method", ["cotrain-sft", "cotrain3-sft", "super-sft"])
@@ -125,9 +168,16 @@ def test_resume_overrides_and_skip_norm_use_the_matching_staged_assets(source_tr
             "--ckpt-base-dir",
             "/oss/custom/checkpoints",
             *(["--drawer-root", "/oss/custom/drawer"] if method in ("cotrain3-sft", "super-sft") else []),
-            *([
-                "--extra-drawer-root", "/oss/custom/new drawer", "--plate-root", "/oss/custom/new plate",
-            ] if method == "super-sft" else []),
+            *(
+                [
+                    "--extra-drawer-root",
+                    "/oss/custom/new drawer",
+                    "--plate-root",
+                    "/oss/custom/new plate",
+                ]
+                if method == "super-sft"
+                else []
+            ),
         ]
     )
     launch = json.loads((stage / "nebula_launch.json").read_text())
@@ -162,6 +212,11 @@ def test_resume_overrides_and_skip_norm_use_the_matching_staged_assets(source_tr
         ["--drawer-root", "/unused/drawer"],
         ["--extra-drawer-root", "/unused/drawer"],
         ["--plate-root", "/unused/plate"],
+        ["--validation-fraction", "0.2"],
+        ["--split-seed", "7"],
+        ["--include-noted-episodes"],
+        ["--method", "prompt-aug-sft", "--validation-fraction", "1.0"],
+        ["--method", "prompt-aug-sft", "--validation-fraction", "nan"],
         ["--", "--data.repo-id", "/different/data"],
         ["--", "--overwrite"],
         ["--", "--resume"],

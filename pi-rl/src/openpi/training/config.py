@@ -29,6 +29,7 @@ import openpi.policies.lingdong_policy as lingdong_policy
 import openpi.policies.lingdong_rl_policy as lingdong_rl_policy
 import openpi.policies.pku_franka_collect_policy as pku_franka_collect_policy
 import openpi.policies.pku_franka_collect_rl_policy as pku_franka_collect_rl_policy
+import openpi.policies.pku_franka_language as pku_franka_language
 import openpi.policies.pku_franka_policy as pku_franka_policy
 import openpi.policies.pku_franka_unified_policy as pku_franka_unified_policy
 import openpi.policies.robotwin_policy as robotwin_policy
@@ -39,6 +40,7 @@ import openpi.training.episode_filter as _episode_filter
 import openpi.training.misc.polaris_config as polaris_config
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
+import openpi.training.pku_franka_prompt_data as _pku_franka_prompt_data
 import openpi.training.progress_advantage as _progress_advantage
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
@@ -114,6 +116,9 @@ class DataConfig:
     # Optional episode whitelist. For single-repo datasets: tuple of episode indices.
     # For multi-repo (MultiDataConfig): mapping of {repo_id: tuple[int, ...]}.
     episode_ids: tuple[int, ...] | Mapping[str, tuple[int, ...]] | None = None
+
+    # Equal probability per original episode, then a uniform frame within that episode.
+    episode_balanced_sampling: bool = False
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -1232,6 +1237,79 @@ class LeRobotPkuFrankaSuperDataConfig(LeRobotPkuFrankaPickplaceCollectDrawerData
     @override
     def _collection_roots(self) -> tuple[str, ...]:
         return (self.dataset_root, *self.additional_dataset_roots)
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPkuFrankaPromptDataConfig(MultiDataConfigFactory):
+    """Online attribute omission over fine_task-labeled plate/drawer episodes only."""
+
+    repo_ids: tuple[str, ...] = (
+        "/oss/embodied-ai-data/pku/fr3_real_pickplace_20261027_20261030_merged",
+        "/oss/embodied-ai-data/pku/fr3_plate_20261103",
+        "/oss/embodied-ai-data/pku/fr3_drawer_20261102_03",
+    )
+    split: Literal["train", "validation"] = "train"
+    validation_fraction: float = 0.1
+    split_seed: int = 42
+    include_noted_episodes: bool = False
+    augment_prompts: bool = True
+    plate_probabilities: tuple[float, ...] = (0.2, 0.3, 0.3, 0.2)
+    drawer_probabilities: tuple[float, ...] = (0.2, 0.6, 0.2)
+
+    @override
+    def create_for_inference(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
+        # Serving requires only checkpoint normalization and the caller's instruction.
+        return dataclasses.replace(
+            self.create_base_multi_config(assets_dirs, model_config, ()),
+            data_transforms=_transforms.Group(
+                inputs=[pku_franka_language.PkuFrankaPromptInputs()],
+                outputs=[pku_franka_collect_policy.PkuFrankaCollectOutputs()],
+            ),
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=("action",),
+            video_backend="pyav",
+            prompt_from_task=True,
+        )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MultiDataConfig:
+        if self.split not in {"train", "validation"}:
+            raise ValueError(f"Unknown FR3 prompt split: {self.split}")
+        pku_franka_language.validate_probabilities(self.plate_probabilities, 4)
+        pku_franka_language.validate_probabilities(self.drawer_probabilities, 3)
+        records = _pku_franka_prompt_data.episode_records(
+            self.repo_ids, validation_fraction=self.validation_fraction, split_seed=self.split_seed,
+            include_noted_episodes=self.include_noted_episodes,
+        )
+        selected = [record for record in records if record.split == self.split]
+        if not selected:
+            raise ValueError(f"No FR3 episodes in split={self.split}; check sources and split settings")
+        repo_ids = tuple(dict.fromkeys(record.repo_id for record in selected))
+        for repo in repo_ids:
+            LeRobotPkuFrankaPickplaceCollectDataConfig._validate_repo(repo)  # noqa: SLF001
+        # MultiLeRobotDataset currently shares nominal video FPS; it does not resample
+        # acquisition timestamps or claim that nominal FPS is the measured control rate.
+        episodes = tuple({r.episode_index: r for r in selected if r.repo_id == repo} for repo in repo_ids)
+        if sum(map(len, episodes)) != len(selected):
+            raise ValueError("Duplicate local FR3 episode indices")
+        base = self.create_for_inference(assets_dirs, model_config)
+        manifest = pathlib.Path(self.assets.assets_dir or assets_dirs) / base.asset_id / "prompt_episodes.json"
+        _pku_franka_prompt_data.save_manifest(
+            manifest, records, roots=self.repo_ids, validation_fraction=self.validation_fraction,
+            split_seed=self.split_seed, include_noted_episodes=self.include_noted_episodes,
+            augment_prompts=self.augment_prompts, plate_probabilities=self.plate_probabilities,
+            drawer_probabilities=self.drawer_probabilities,
+        )
+        logging.info("FR3 prompt SFT: %s, %d original episodes, %d datasets; manifest=%s",
+                     self.split, len(selected), len(repo_ids), manifest)
+        return dataclasses.replace(
+            base, repo_ids=repo_ids, episode_ids={repo: tuple(rows) for repo, rows in zip(repo_ids, episodes, strict=True)},
+            episode_balanced_sampling=self.split == "train",
+            training_transforms=_transforms.Group(inputs=[pku_franka_language.PkuFrankaPromptAugmentation(
+                episodes, augment=self.augment_prompts and self.split == "train",
+                plate_probabilities=self.plate_probabilities, drawer_probabilities=self.drawer_probabilities,
+            )]),
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2772,6 +2850,25 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
         checkpoint_base_dir="./checkpoints",
     ),
+    *[
+        TrainConfig(
+            **_COLLECT_OBJECTS_SFT_HYPERPARAMS,
+            name=name,
+            num_workers=4,
+            model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),
+            data=LeRobotPkuFrankaPromptDataConfig(
+                repo_id="pku_franka_pickplace_prompt_aug",
+                assets=AssetsConfig(asset_id="pku_franka_pickplace_prompt_aug"),
+                augment_prompts=augment,
+            ),
+            weight_loader=weight_loaders.CheckpointWeightLoader("/oss/embodied-ai-data/pku/pi05_base/params"),
+            checkpoint_base_dir="./checkpoints",
+        )
+        for name, augment in (
+            ("pi05_pku_franka_pickplace_prompt_aug", True),
+            ("pi05_pku_franka_pickplace_prompt_baseline", False),
+        )
+    ],
     TrainConfig(
         name="pi05_pku_franka_pickplace_iql",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=30, discrete_state_input=True),

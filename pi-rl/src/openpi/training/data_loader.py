@@ -481,12 +481,22 @@ def create_torch_data_loader(
         seed: The seed to use for shuffling the data.
     """
     dataset = make_torch_dataset(data_config, action_horizon, model_config)
+    episode_sampler = None
+    if data_config.episode_balanced_sampling:
+        # Torch seeds NumPy in worker processes; seed the zero-worker path as well.
+        np.random.seed(seed)
+        if framework == "pytorch" and torch.distributed.is_initialized():
+            raise NotImplementedError("Episode-balanced sampling currently supports single-process training only")
+        episode_sampler = torch.utils.data.WeightedRandomSampler(
+            episode_balanced_weights(dataset), len(dataset), replacement=True,
+            generator=torch.Generator().manual_seed(seed),
+        )
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size
     # For JAX, divide by process count
-    sampler = None
+    sampler = episode_sampler
     if framework == "pytorch":
         if torch.distributed.is_initialized():
             sampler = torch.utils.data.distributed.DistributedSampler(
@@ -516,6 +526,22 @@ def create_torch_data_loader(
     )
 
     return DataLoaderImpl(data_config, data_loader)
+
+
+def episode_balanced_weights(dataset: Dataset) -> np.ndarray:
+    """Use row identities without decoding media; local episode IDs stay scoped by repo."""
+    while isinstance(dataset, TransformedDataset):
+        dataset = dataset._dataset  # noqa: SLF001
+    subsets = getattr(dataset, "_datasets", None) or [dataset]
+    weights = []
+    for sub in subsets:
+        episode_ids = np.asarray(sub.hf_dataset["episode_index"], dtype=np.int64)
+        _, inverse, counts = np.unique(episode_ids, return_inverse=True, return_counts=True)
+        weights.append(1.0 / counts[inverse])
+    result = np.concatenate(weights)
+    if len(result) != len(dataset) or not len(result):
+        raise ValueError("Cannot align episode sampling weights with LeRobot rows")
+    return result
 
 
 def create_rlds_data_loader(

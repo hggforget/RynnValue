@@ -43,7 +43,18 @@ VARIANTS = {
         "pi05_pku_franka_super",
         "pku_franka_super",
     ),
+    "prompt-aug-sft": (
+        "scripts/train_sft_pku_franka_pickplace_prompt_aug.sh",
+        "pi05_pku_franka_pickplace_prompt_aug",
+        "pku_franka_pickplace_prompt_aug",
+    ),
+    "prompt-baseline-sft": (
+        "scripts/train_sft_pku_franka_pickplace_prompt_aug.sh",
+        "pi05_pku_franka_pickplace_prompt_baseline",
+        "pku_franka_pickplace_prompt_aug",
+    ),
 }
+PROMPT_METHODS = ("prompt-aug-sft", "prompt-baseline-sft")
 
 
 def validate_norm_stats(path):
@@ -107,9 +118,16 @@ def main(argv=None):
     parser.add_argument("--algo-name", default="pytorch271")
     parser.add_argument("--repo-id", help="Pick-and-place path; IQL defaults to the expert-labeled dataset.")
     parser.add_argument("--collect-repo-id", help="Collect-objects path for joint SFT methods.")
-    parser.add_argument("--drawer-root", help="Original drawer root for cotrain3-sft / super-sft.")
+    parser.add_argument("--drawer-root", help="Original drawer root for cotrain3-sft / super-sft / prompt SFT.")
     parser.add_argument("--extra-drawer-root", help="New drawer root for --method super-sft.")
-    parser.add_argument("--plate-root", help="New plate root for --method super-sft.")
+    parser.add_argument("--plate-root", help="New plate root for super-sft or prompt SFT.")
+    parser.add_argument(
+        "--validation-fraction", type=float, help="Held-out episode fraction for prompt SFT; default 0.1."
+    )
+    parser.add_argument("--split-seed", type=int, help="Episode split seed for prompt SFT; default 42.")
+    parser.add_argument(
+        "--include-noted-episodes", action="store_true", help="Include reviewed noted episodes in prompt SFT."
+    )
     parser.add_argument("--weight-params-path", default=DATA_ROOT + "pi05_base/params")
     parser.add_argument("--ckpt-base-dir", default=DATA_ROOT + "nebula_checkpoints")
     parser.add_argument("--openpi-data-home", default=DATA_ROOT + "openpi_cache")
@@ -139,10 +157,18 @@ def main(argv=None):
         parser.error("--resume requires the original --exp-name")
     if args.collect_repo_id is not None and args.method not in ("cotrain-sft", "cotrain3-sft", "super-sft"):
         parser.error("--collect-repo-id requires a joint SFT method")
-    if args.drawer_root is not None and args.method not in ("cotrain3-sft", "super-sft"):
-        parser.error("--drawer-root requires --method cotrain3-sft or super-sft")
-    if (args.extra_drawer_root is not None or args.plate_root is not None) and args.method != "super-sft":
-        parser.error("--extra-drawer-root / --plate-root require --method super-sft")
+    if args.drawer_root is not None and args.method not in ("cotrain3-sft", "super-sft", *PROMPT_METHODS):
+        parser.error("--drawer-root requires cotrain3-sft, super-sft, or prompt SFT")
+    if args.extra_drawer_root is not None and args.method != "super-sft":
+        parser.error("--extra-drawer-root requires --method super-sft")
+    if args.plate_root is not None and args.method not in ("super-sft", *PROMPT_METHODS):
+        parser.error("--plate-root requires super-sft or prompt SFT")
+    if (
+        args.validation_fraction is not None or args.split_seed is not None or args.include_noted_episodes
+    ) and args.method not in PROMPT_METHODS:
+        parser.error("Prompt split/quality options require prompt-aug-sft or prompt-baseline-sft")
+    if args.validation_fraction is not None and not 0 < args.validation_fraction < 1:
+        parser.error("--validation-fraction must be between 0 and 1")
     extra = args.train_args[1:] if args.train_args[:1] == ["--"] else args.train_args
     for flag in extra:
         if flag.replace("_", "-").startswith(
@@ -178,7 +204,17 @@ def main(argv=None):
         "TOKENIZERS_PARALLELISM": "false",
     }
     repo = args.repo_id or (PICKPLACE_REWARDS if args.method == "iql" else PICKPLACE)
-    if args.method in ("cotrain-sft", "cotrain3-sft", "super-sft"):
+    if args.method in PROMPT_METHODS:
+        env.update(
+            CONFIG_NAME=config,
+            PICKPLACE_REPO_ID=repo,
+            PLATE_ROOT=args.plate_root or PLATE,
+            DRAWER_ROOT=args.drawer_root or DRAWER,
+            VALIDATION_FRACTION=str(args.validation_fraction if args.validation_fraction is not None else 0.1),
+            SPLIT_SEED=str(args.split_seed if args.split_seed is not None else 42),
+            INCLUDE_NOTED_EPISODES=str(int(args.include_noted_episodes)),
+        )
+    elif args.method in ("cotrain-sft", "cotrain3-sft", "super-sft"):
         env.update(PICKPLACE_REPO_ID=repo, COLLECT_REPO_ID=args.collect_repo_id or COLLECT)
     else:
         env["REPO_ID"] = repo

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# --method sft | iql | cotrain-sft; extra trainer flags follow --.
+# --method sft | iql | cotrain-sft | cotrain3-sft | super-sft | prompt-aug-sft | prompt-baseline-sft
+# Extra trainer flags follow --.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUBMIT_PYTHON="${SUBMIT_PYTHON:-/opt/conda/envs/rynnvalue_r1/bin/python}"
